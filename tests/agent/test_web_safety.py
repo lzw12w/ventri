@@ -22,6 +22,12 @@ pytestmark = pytest.mark.anyio
 PUBLIC = "93.184.216.34"
 
 
+@pytest.fixture(autouse=True)
+def _no_env_proxy(monkeypatch):
+    for v in us._PROXY_ENV_VARS + ("NO_PROXY", "no_proxy"):  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.delenv(v, raising=False)
+
+
 def resolver_for(table: dict[str, list[str]]):
     calls: list[str] = []
 
