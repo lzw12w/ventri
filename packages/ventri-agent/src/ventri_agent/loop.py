@@ -41,11 +41,12 @@ from .providers.pricing import BEIJING
 from .session import Budget, Replay, SessionInfo, SessionLog
 from .threat_patterns import scan_for_threats
 from .tokens import estimate_tokens
+from .tools.output import head_tail
 from .tools.registry import Risk, Tool, ToolContext, ToolError, ToolRegistry, call_handler, render_result
 from .tools.registry import validation_message as _vmsg
 
-ARTIFACT_TOKENS = 8_000      # tool results above this go to the artifact directory
-PREVIEW_CHARS = 2_000
+ARTIFACT_TOKENS = 8_000      # default: tool results above this go to the artifact directory
+PREVIEW_TOKENS = 600         # head + tail kept inline for such a result
 
 
 def _fence(tool: str, text: str) -> str:
@@ -191,6 +192,12 @@ class AgentLoop:
                 route = self.route
                 if self.builder.needs_compaction(route, self.last_prompt_tokens):
                     await self.compact(sink)
+                pruned = self.builder.maybe_prune()
+                if pruned:
+                    self.ctx.trace("context.prune", session=self.info.id, **pruned)
+                    await _emit(sink, TurnEvent("notice", self.info.id,
+                                                f"pruned {pruned['messages']} older messages "
+                                                f"(~{pruned['saved']} tokens) to artifacts", pruned))
                 req = self.builder.build(route)
                 try:
                     done = await self._call(req, sink, route)
@@ -354,20 +361,23 @@ class AgentLoop:
             self.ctx.trace("tool.error", session=self.info.id, tool=tool.name, error=repr(e))
         self.ctx.trace("tool.call", session=self.info.id, tool=tool.name, risk=tool.risk.label, ok=ok,
                        ms=round((time.monotonic() - t0) * 1000), chars=len(text))
-        if ok and estimate_tokens(text) > ARTIFACT_TOKENS:
+        if ok and estimate_tokens(text) > (self.info.agent.inline_tokens or ARTIFACT_TOKENS):
             text = self._artifact(call_id, tool.name, text)
         if ok and tool.untrusted:
             text = _fence(tool.name, text)
         return text
 
     def _artifact(self, call_id: str, tool: str, text: str) -> str:
+        """Store a large result; keep its head (errors surface early) and tail
+        (the latest lines matter most) inline with a pointer to the rest."""
         d = self.info.dir / "artifacts"
         d.mkdir(parents=True, exist_ok=True)
         handle = f"{call_id}"
         (d / f"{handle}.txt").write_text(text, encoding="utf-8")
-        return (text[:PREVIEW_CHARS] + f"\n\n[... truncated: the full result of {tool} ({len(text)} chars, "
-                f"~{estimate_tokens(text)} tokens) is artifact {handle!r}; read more with "
-                f"artifact.read(handle={handle!r}, offset={PREVIEW_CHARS})]")
+        head, tail, omitted = head_tail(text, PREVIEW_TOKENS)
+        return (f"{head}\n\n[... {omitted} chars omitted: the full result of {tool} ({len(text)} chars, "
+                f"~{estimate_tokens(text)} tokens) is artifact {handle!r}; read the middle with "
+                f"artifact.read(handle={handle!r}, offset={len(head)}) ...]\n\n{tail}")
 
     # ------------------------------------------------------- budget wrap-up
     async def _wrap_up(self, why: str, sink: Sink | None, route: Route) -> tuple[str, Usage, float]:

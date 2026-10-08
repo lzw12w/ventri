@@ -9,6 +9,8 @@
   disk cache keeps hitting after a restart
 * ``msg``      -- one history message (user / assistant incl. reasoning_content / tool / system tail)
 * ``compact``  -- ``drop`` leading history messages replaced by ``summary``
+* ``prune``    -- edits (by message ``seq``) that replaced older large tool
+  results / arguments / reasoning with stubs (``ContextBuilder.maybe_prune``)
 * ``usage``    -- one model call: model, route, usage, cost, peak flag
 * ``turn``     -- turn boundary (status, steps)
 * ``work``     -- working-memory snapshot
@@ -73,6 +75,7 @@ class Replay:
     extracted_upto: int = 0                # count of history messages already mined for memory
     last_prompt_tokens: int = 0
     compactions: int = 0
+    prunes: int = 0
     total_messages: int = 0                # messages ever appended (incl. compacted ones)
 
 
@@ -122,6 +125,10 @@ class SessionLog:
                     drop = int(rec["drop"])
                     r.history = [Message.system(rec["summary"], compacted=drop), *r.history[drop:]]
                     r.compactions += 1
+                elif t == "prune":
+                    from .context import apply_prune
+                    r.history = apply_prune(r.history, list(rec.get("edits") or []))
+                    r.prunes += 1
                 elif t == "usage":
                     u = Usage.from_json(rec.get("usage") or {})
                     r.usage = r.usage + u
