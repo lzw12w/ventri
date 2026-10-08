@@ -441,6 +441,19 @@ class Fiber:
                     self._set_state(State.PENDING)
                 return True
 
+    async def _park(self) -> None:
+        """Stop-first: tear down a live fiber but keep it (PENDING, parked) so a
+        failed replacement can restart it with its original config."""
+        with anyio.CancelScope(shield=True):
+            async with self._locked():
+                self._parked = True
+                if self.state is State.ACTIVE:
+                    self._set_state(State.UNLOADING)
+                    await self._teardown()
+                    self._set_state(State.PENDING, reason="stop-first")
+                elif self.state is State.FAILED:
+                    self._set_state(State.PENDING, reason="stop-first")
+
     def _finalize_dispose(self) -> None:
         self._set_state(State.DISPOSED)
         providers = self.kernel._providers

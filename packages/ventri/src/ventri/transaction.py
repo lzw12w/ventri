@@ -40,7 +40,7 @@ from .errors import (
     TransactionTimeout,
 )
 from .fiber import Fiber, State, maybe_await, task_local
-from .plugin import MISSING, keyname
+from .plugin import MISSING, describe, keyname
 from .report import TxReport
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -147,6 +147,10 @@ class Transaction:
         self._staged: list[Fiber] = []     # staged roots, in creation order
         self._removals: list[Fiber] = []   # live fibers to dispose on commit
         self._replaces: dict[Fiber, Fiber] = {}  # new -> old
+        self._deferred: list[tuple[Fiber, Fiber]] = []  # stop-first (new, old)
+        self._stopped: list[Fiber] = []                 # old fibers stopped at commit
+        self._pre_stop: dict[tuple[Realm, Any], Binding] = {}
+        self._pre_restarted: list[str] = []
 
     def __repr__(self) -> str:
         return (f"<Transaction #{self.id} {self.state} staged={len(self._staged)} "
@@ -222,6 +226,8 @@ class Transaction:
                     return False
                 try:
                     await self._prepare()
+                    if self._deferred:
+                        await self._stop_first()
                     await self._run_probes(raise_errors=True)
                     self._validate()
                 except BaseException as e:
@@ -239,6 +245,9 @@ class Transaction:
         """Dry run: settle and check everything like a commit, run the probes, record
         the report -- then always roll back."""
         error: BaseException | None = None
+        for new, old in self._deferred:
+            self.report.skipped[new.label] = (
+                f"stop-first replacement of {old.label} is not started in a dry run")
         try:
             await self._prepare()
             self._validate()
@@ -346,11 +355,25 @@ class Transaction:
                         k._mark_dirty(realm, self)
 
     async def replace(self, fiber: Fiber, plugin: Any = _MISSING, config: Any = _MISSING, *,
-                      timeout: Any = _MISSING, retry: Any = _MISSING) -> Fiber:
+                      timeout: Any = _MISSING, retry: Any = _MISSING,
+                      strategy: str | None = None) -> Fiber:
         """Stage ``fiber`` -> new fiber with new plugin and/or config, same parent.
-        The new fiber inherits ``meta`` and the timeout / retry overrides unless given."""
+        The new fiber inherits ``meta`` and the timeout / retry overrides unless given.
+
+        ``strategy`` is ``"blue-green"`` (default: the new instance runs next to the
+        old one until commit) or ``"stop-first"`` (default when either plugin is
+        ``exclusive``): the new fiber is *not started* until commit, where the old
+        one is stopped first. If the new instance then fails, the old one is
+        restarted with its original config -- a *degraded* rollback: configuration
+        and service topology are restored, the old instance's memory state is not,
+        and live dependents observe a gap while the swap happens."""
         self._check()
         plugin = fiber.plugin if plugin is _MISSING else plugin
+        if strategy is None:
+            exclusive = (fiber.spec is not None and fiber.spec.exclusive) or describe(plugin).exclusive
+            strategy = "stop-first" if exclusive else "blue-green"
+        if strategy not in ("blue-green", "stop-first"):
+            raise ValueError(f"unknown replace strategy {strategy!r}")
         config = fiber.raw_config if config is _MISSING else config
         timeout = fiber._timeout if timeout is _MISSING else timeout
         retry = fiber._retry if retry is _MISSING else retry
@@ -358,6 +381,16 @@ class Transaction:
         if parent is None:
             raise TransactionError("cannot replace the root fiber")
         await self.dispose(fiber)
+        if strategy == "stop-first" and fiber.tx is None:
+            new = Fiber(self.kernel, parent, plugin, config, tx=self, meta=dict(fiber.meta),
+                        timeout=timeout, retry=retry)
+            new._parked = True  # started at commit, after the old fiber stopped
+            self._staged.append(new)
+            self._deferred.append((new, fiber))
+            self._replaces[new] = fiber
+            async with self.kernel._op(self):
+                pass  # settle + diagnose (the new fiber reports "parked")
+            return new
         new = await self._stage(parent, plugin, config, meta=dict(fiber.meta), timeout=timeout,
                                 retry=retry)
         if fiber.tx is None:
@@ -407,6 +440,29 @@ class Transaction:
                 raise TransactionConflict(
                     f"{keyname(key)} was provided by {cur.owner.label} during the transaction")
 
+    async def _stop_first(self) -> None:
+        """Commit phase for stop-first replacements: stop the old fibers, start the
+        new ones, settle and check again. Raising here causes a degraded rollback."""
+        k = self.kernel
+        for new, old in self._deferred:
+            for f in self._subtree(old):
+                for b in f._bindings:
+                    realm = b.realm
+                    assert realm is not None
+                    if realm.services.get(b.key) is b:
+                        self._pre_stop[(realm, b.key)] = b
+            for f in k._walk():
+                if (f.tx is None and f.state is State.ACTIVE and f not in self._removed()
+                        and any(b.owner is old for b in f._snapshot.values())):
+                    self._pre_restarted.append(f.label)
+        async with k._op(None):
+            for _new, old in self._deferred:
+                await old._park()
+                self._stopped.append(old)
+        for new, _old in self._deferred:
+            new._parked = False
+        await self._prepare()
+
     def _realm_key(self, realm: Realm, key: Any) -> str:
         return keyname(key) if realm is self.kernel._root_realm else f"{realm.name}:{keyname(key)}"
 
@@ -427,7 +483,7 @@ class Transaction:
         r.replaced = {new.label: old.label for new, old in self._replaces.items()}
         svc: dict[str, list[str]] = {"added": [], "removed": [], "replaced": []}
         for (realm, key), b in self._overlay.items():
-            cur = realm.services.get(key)
+            cur = realm.services.get(key) or self._pre_stop.get((realm, key))
             name = self._realm_key(realm, key)
             if b is None:
                 if cur is not None and cur.owner in removed:
@@ -437,6 +493,7 @@ class Transaction:
             else:
                 svc["added"].append(name)
         r.services = svc
+        r.restarted.extend(self._pre_restarted)
         for f in live:
             if f in removed:
                 continue
@@ -498,5 +555,14 @@ class Transaction:
             await f._dispose()
         self._overlay.clear()
         self.state = "rolled_back"
-        self.kernel._trace("tx.rollback", self.ctx.fiber, **self._meta(), error=repr(error))
-        await self.kernel._settle(None, full=True)
+        k = self.kernel
+        if self._stopped:  # stop-first: restart the old instances with their original config
+            self.report.degraded = True
+            async with k._op(None):
+                for old in self._stopped:
+                    old._parked = False
+                    if old.state is State.PENDING:
+                        await old._activate()
+        extra = {"degraded": True} if self._stopped else {}
+        k._trace("tx.rollback", self.ctx.fiber, **self._meta(), error=repr(error), **extra)
+        await k._settle(None, full=True)

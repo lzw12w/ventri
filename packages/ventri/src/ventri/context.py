@@ -258,17 +258,20 @@ class Context:
                            timeout=timeout, dry_run=dry_run, probe=probe)
 
     async def replace(self, fiber: Fiber, plugin_or_config: Any = _MISSING, *,
-                      plugin: Any = _MISSING, config: Any = _MISSING) -> Fiber:
+                      plugin: Any = _MISSING, config: Any = _MISSING,
+                      strategy: str | None = None) -> Fiber:
         """Hot-swap ``fiber`` (new plugin and/or config) in a one-op transaction.
         A positional callable is taken as the plugin, anything else as config.
-        On failure the old fiber keeps running untouched and the error is raised."""
+        On failure the old fiber keeps running untouched and the error is raised
+        (for a stop-first replacement it is restarted instead; see
+        ``Transaction.replace``)."""
         if plugin_or_config is not _MISSING:
             if callable(plugin_or_config):
                 plugin = plugin_or_config
             else:
                 config = plugin_or_config
         async with self.transaction() as tx:
-            new = await tx.replace(fiber, plugin=plugin, config=config)
+            new = await tx.replace(fiber, plugin=plugin, config=config, strategy=strategy)
         return new
 
 
