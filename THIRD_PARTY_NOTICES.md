@@ -1,0 +1,38 @@
+# Third-party notices
+
+Ventri includes code adapted from the following third-party projects.
+
+## Hermes Agent
+
+- Project: Hermes Agent — https://github.com/NousResearch/hermes-agent
+- Adapted from commit `a28a5d03a9fa60418db5f44f3436fa2aa029c8f2`
+- Used in: `packages/ventri-agent/src/ventri_agent/tools/_hermes_fs/` (file-tool core: fuzzy
+  find-and-replace, read/write/patch operations, search, read-before-write state, write guards),
+  the file-tool behaviour of `packages/ventri-agent/src/ventri_agent/tools/fs.py` and `notes.py`,
+  and the ported tests `tests/agent/test_hermes_fuzzy_match.py` and `tests/agent/test_fs_hermes.py`.
+  Each adapted file carries an attribution header naming its Hermes source files.
+- License: MIT
+
+```
+MIT License
+
+Copyright (c) 2025 Nous Research
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
