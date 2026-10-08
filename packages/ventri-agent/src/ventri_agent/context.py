@@ -30,8 +30,8 @@ from .memory import LongTermMemory
 from .messages import ChatRequest, Message
 from .paths import expand
 from .providers.base import ModelProvider, Route
-from .providers.fake import estimate_tokens
 from .session import Replay, SessionInfo, SessionLog
+from .tokens import estimate_tokens
 from .tools.registry import Tool, ToolRegistry, canonical
 
 DEFAULT_PERSONA = """你是 Ventri Agent，Jeff 的个人助理（DeepSeek 驱动，运行在用户本机）。

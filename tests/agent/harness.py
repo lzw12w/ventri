@@ -64,6 +64,8 @@ def make_test_tools(probe: Probe) -> list[Tool]:
         return "never"
 
     def big(a: TextArgs, tc: ToolContext) -> str:
+        if a.text == "zh":   # 15K Chinese chars: ~9000 tokens (len/4 would have said 3750)
+            return "中文工具结果" * 2500
         return "".join(f"line {i:05d} " + "x" * 60 + "\n" for i in range(800))  # ~56k chars
 
     def web(a: TextArgs, tc: ToolContext) -> str:

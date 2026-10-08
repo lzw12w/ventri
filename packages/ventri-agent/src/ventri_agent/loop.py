@@ -37,9 +37,9 @@ from .memory import LongTermMemory, WorkingMemory
 from .messages import ContentDelta, Done, Message, ReasoningDelta, ToolCall, ToolCallStart, Usage
 from .permission import Policy, ToolCheck, ToolRequest
 from .providers.base import ModelProvider, ProviderError, Route, collect, complete_json
-from .providers.fake import estimate_tokens
 from .providers.pricing import BEIJING
 from .session import Budget, Replay, SessionInfo, SessionLog
+from .tokens import estimate_tokens
 from .tools.registry import Risk, Tool, ToolContext, ToolError, ToolRegistry, call_handler, render_result
 from .tools.registry import validation_message as _vmsg
 
@@ -329,7 +329,7 @@ class AgentLoop:
         results[k] = await self.execute(tool, args, call.id)
 
     async def execute(self, tool: Tool, args: Any, call_id: str) -> str:
-        tc = ToolContext(self.info.id, self.ctx, self.info.dir, self.info.origin)
+        tc = ToolContext(self.info.id, self.ctx, self.info.dir, self.info.origin, call_id=call_id)
         t0 = time.monotonic()
         ok = True
         try:

@@ -75,6 +75,7 @@ class ToolContext:
     workdir: Path                      # session directory (artifacts live below it)
     origin: str = "user"               # user | routine | evolution
     extras: dict[str, Any] = field(default_factory=dict)
+    call_id: str = ""                  # the model's tool-call id (names artifacts)
 
     def get(self, key: Any, default: Any = None) -> Any:
         return self.ctx.get(key, default)

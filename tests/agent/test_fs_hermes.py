@@ -27,6 +27,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+from ventri_agent.tokens import estimate_tokens
 from ventri_agent.tools import fs, notes
 from ventri_agent.tools._hermes_fs import ops
 from ventri_agent.tools._hermes_fs import search as hsearch
@@ -214,8 +215,15 @@ class TestReadPaging:
     async def test_char_budget_truncates_on_line_boundary(self, t: FS, root: Path) -> None:
         (root / "big.txt").write_text("".join(f"{i:06d} " + "x" * 90 + "\n" for i in range(1, 1001)))
         out = await t("read", path="big.txt")
-        assert len(out) < fs.READ_CHAR_BUDGET + 1000
+        assert estimate_tokens(out) < fs.READ_TOKEN_BUDGET + 300
         assert "read budget" in out and "Use offset=" in out
+
+    async def test_budget_counts_chinese_heavier(self, t: FS, root: Path) -> None:
+        (root / "zh.txt").write_text("".join(f"第{i}行：" + "中文内容" * 20 + "\n" for i in range(1, 400)),
+                                     encoding="utf-8")
+        out = await t("read", path="zh.txt")
+        assert "read budget" in out and estimate_tokens(out) < fs.READ_TOKEN_BUDGET + 300
+        assert len(out) < 13_000   # ~0.6 token per Chinese char: far fewer chars than an ASCII read
 
     async def test_long_line_clamped(self, t: FS, root: Path) -> None:
         (root / "long.txt").write_text("a" * 10_000 + "\nshort\n")

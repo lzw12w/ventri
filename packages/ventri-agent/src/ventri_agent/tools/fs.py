@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 import ventri
 
+from ..tokens import CJK_TOKENS_PER_CHAR, OTHER_TOKENS_PER_CHAR, count_cjk, estimate_tokens, prefix_within
 from ._hermes_fs import guards, ops
 from ._hermes_fs import search as hsearch
 from ._hermes_fs.common import (
@@ -47,10 +48,12 @@ from ._hermes_fs.common import (
 from ._hermes_fs.state import FileState, file_metadata
 from .registry import Risk, Tool, ToolContext, ToolError, ToolRegistry
 
-# The per-read character budget. Hermes uses 100K; Ventri moves any tool result
-# above ~8K tokens (~32K chars) into an artifact, which would hide most of a read
-# from the model while the read-tracker counted it as seen -- so stay below that.
-READ_CHAR_BUDGET = 30_000
+# The per-read budget. Hermes uses 100K chars; Ventri moves any tool result above
+# 8K estimated tokens into an artifact, which would hide most of a read from the
+# model while the read-tracker counted it as seen -- so stay below that. Measured
+# with the CJK-aware estimate (ventri_agent.tokens): ~23K ASCII chars or ~11K
+# Chinese characters.
+READ_TOKEN_BUDGET = 7_000
 LARGE_FILE_HINT_BYTES = 512_000
 LIST_LIMIT = 500
 
@@ -134,23 +137,24 @@ async def in_thread[T](fn: Callable[[], T], *, cancellable: bool) -> T:
 # ====================================================================== core operations
 # Shared by fs.* and notes.* (``display`` maps resolved paths to model-facing names).
 
-def _truncate_to_char_budget(content: str, max_chars: int) -> tuple[str, int, bool]:
-    """Trim line-numbered content to the last COMPLETE line within ``max_chars``
-    (Hermes ``_truncate_to_char_budget``); a first line longer than the budget is
-    clamped so the read always advances."""
-    if len(content) <= max_chars:
+def _truncate_to_budget(content: str, max_tokens: int) -> tuple[str, int, bool]:
+    """Trim line-numbered content to the last COMPLETE line within ``max_tokens``
+    (Hermes ``_truncate_to_char_budget``, measured in estimated tokens); a first
+    line longer than the budget is clamped so the read always advances."""
+    if estimate_tokens(content) <= max_tokens:
         return content, (content.count("\n") + 1 if content else 0), False
     lines = content.split("\n")
     kept: list[str] = []
-    running = 0
+    running = 0.0
     for line in lines:
-        addition = len(line) + (1 if kept else 0)
-        if running + addition > max_chars:
+        cjk = count_cjk(line)
+        addition = cjk * CJK_TOKENS_PER_CHAR + (len(line) - cjk + (1 if kept else 0)) * OTHER_TOKENS_PER_CHAR
+        if running + addition > max_tokens:
             break
         kept.append(line)
         running += addition
     if not kept:
-        kept.append(lines[0][:max_chars])
+        kept.append(prefix_within(lines[0], max_tokens))
     return "\n".join(kept), len(kept), True
 
 
@@ -193,12 +197,12 @@ def read_impl(roots: Roots, fstate: FileState, raw: str, resolved: Path, offset:
     content = r.content
     truncated = r.truncated
     end_line = min(offset + limit - 1, r.total_lines) if r.total_lines else offset + limit - 1
-    if len(content) > READ_CHAR_BUDGET:
-        content, kept, _ = _truncate_to_char_budget(content, READ_CHAR_BUDGET)
+    if estimate_tokens(content) > READ_TOKEN_BUDGET:
+        content, kept, _ = _truncate_to_budget(content, READ_TOKEN_BUDGET)
         next_offset = offset + kept
         end_line = next_offset - 1
         truncated = True
-        notes.append(f"Output truncated at the {READ_CHAR_BUDGET:,}-char read budget after {kept} line(s) "
+        notes.append(f"Output truncated at the ~{READ_TOKEN_BUDGET:,}-token read budget after {kept} line(s) "
                      f"(showing lines {offset}-{end_line} of {r.total_lines}). Use offset={next_offset} "
                      "to continue.")
     elif r.hint:
@@ -405,7 +409,7 @@ class ReadArgs(BaseModel):
     offset: int = Field(1, description="Line number to start reading from (1-indexed, default: 1)")
     limit: int = Field(MAX_LINES, description=(
         f"Maximum number of lines to read (default and max: {MAX_LINES}). Reads are additionally capped at "
-        f"a ~{READ_CHAR_BUDGET // 1000}K-character budget with an offset= continuation."))
+        f"a ~{READ_TOKEN_BUDGET // 1000}K-token budget with an offset= continuation."))
 
 
 class ListArgs(BaseModel):
@@ -469,7 +473,7 @@ class EditArgs(BaseModel):
 READ_DESC = (
     "Read a text file with line numbers and pagination. Output format: 'LINE_NUM|CONTENT' (the prefix is "
     "not part of the file). Suggests similar filenames if not found. Use offset and limit for large files; "
-    f"reads exceeding ~{READ_CHAR_BUDGET // 1000}K characters are truncated on a line boundary with an "
+    f"reads exceeding ~{READ_TOKEN_BUDGET // 1000}K tokens are truncated on a line boundary with an "
     "offset= continuation. Cannot read images/binary files (they are identified instead). Read a file "
     "before overwriting it with fs.write.")
 LIST_DESC = "List a directory (hidden entries skipped). For finding files by name across a tree prefer fs.search target='files'."

@@ -37,6 +37,6 @@ view never counts as a full read for overwriting) instead of being refused as
 binary; CRLF files display as LF; an edit whose (fuzzy) match already equals
 ``new_string`` is a no-op instead of a write; content search fetches one extra
 row so truncation is detected; the Python search fallback replaces Hermes's
-grep/find fallbacks; the read character budget is 30K (Ventri artifacts
-results above ~32K chars).
+grep/find fallbacks; the read budget is ~7K estimated tokens (Ventri artifacts
+results above 8K tokens).
 """

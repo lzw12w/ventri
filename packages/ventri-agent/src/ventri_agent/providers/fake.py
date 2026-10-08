@@ -40,14 +40,13 @@ from ..messages import (
     Usage,
     new_id,
 )
+from ..tokens import estimate_tokens
 from .base import CallStats, ModelCaps, ModelProvider, ProviderError, Route, route_from
 from .pricing import PriceTable
 
+__all__ = ["FakeProvider", "estimate_tokens"]
+
 Step = dict[str, Any] | Callable[[ChatRequest], dict[str, Any]]
-
-
-def estimate_tokens(text: str) -> int:
-    return max(1, (len(text) + 3) // 4) if text else 0
 
 
 def _seg(obj: Any) -> tuple[str, int]:
