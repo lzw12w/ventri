@@ -94,6 +94,12 @@ def page_transport(pages: dict[str, str]) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
+async def mock_dns(host: str, port: int) -> list[str]:
+    """The mock pages live on fictional domains; give them a public (example.com's)
+    address so web.fetch's SSRF pre-flight check passes without real DNS."""
+    return ["93.184.216.34"]
+
+
 def check(spec: dict[str, Any], *, answer: str, base: Path, tools: list[str], executed: list[str],
           mem: LongTermMemory) -> str | None:
     """None when the check passes, else a failure description."""
@@ -163,7 +169,7 @@ async def run_task(task: dict[str, Any], fixture: dict[str, Any], provider: Any,
         @ventri.plugin(name="tool:web(mock)")
         async def web_mock(ctx: Any, config: Any, registry: ToolRegistry) -> None:
             http = await ctx.enter(httpx.AsyncClient(transport=transport))
-            registry.register(ctx, web_tools.make_tool(web_tools.WebConfig(), http))
+            registry.register(ctx, web_tools.make_tool(web_tools.WebConfig(), http, resolver=mock_dns))
 
         t0 = time.monotonic()
         async with Kernel() as k:
