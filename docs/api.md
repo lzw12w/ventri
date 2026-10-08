@@ -133,3 +133,63 @@ Plugin `jsonl` (`use: ventri_std.trace.jsonl`; config `path, rotate_mb=64, keep=
 `ventri run | apply (--dry-run | --validate-only) [--json] | tree | doctor | stubgen`; each config
 command takes `[config] [--profile P]... [--strict]`. Exit codes: 0 ok, 1 problems / failed apply,
 2 configuration or usage error.
+
+## `ventri_agent` (M2, `ventri-agent 0.2.0a1`)
+
+Alpha: public but may still change within 0.2.x. Design: DESIGN.md section 5 and the "M2 实施说明".
+
+### Plugins (`use:` strings)
+
+| use | provides | config |
+|---|---|---|
+| `ventri_agent.providers.deepseek` | `ModelProvider` (`ctx.llm`) | `api_key` (`Secret`, default `$DEEPSEEK_API_KEY`), `base_url`, `beta_url`, `routes`, `strict_tools=false`, `soft_context=256000`, `timeout=900`, `max_retries=4`, `probe=true`, `user_id`, `prices`, `holidays` |
+| `ventri_agent.providers.openai_compat` | `ModelProvider` | `base_url`, `api_key`, `routes`, `context`, `max_output`, `concurrency`, `timeout`, `max_retries` |
+| `ventri_agent.providers.fake` | `ModelProvider` | `script` (steps), `script_file` (JSON/YAML), `chunk_delay` |
+| `ventri_agent.tools.registry` | `ToolRegistry` | -- |
+| `ventri_agent.permission` | `Policy`, `ApprovalBroker`, `AuditLog` | `rules: [{tool, action, risk?, when?, origin?, agent?, session?}]`, `approval_timeout=120`, `audit` |
+| `ventri_agent.memory` | `LongTermMemory` | `path` (`~/.ventri/memory.db`, or `:memory:`) |
+| `ventri_agent.sessions` | `SessionManager` | `dir`, `idle_timeout=1800`, `retention_days=7`, `budget`, `agents`, `extract_memory=true`, `sweep_interval` |
+| `ventri_agent.tools.core` / `.fs` / `.shell` / `.web` / `.notes` / `.memory` / `.inspect` | tools | fs: `roots`, `write`; shell: `cwd`, `policy`, `timeout`, `max_output`; web: `allow_domains`, `timeout`, `max_bytes`; notes: `vault`, `write` |
+| `ventri_agent.channels.cli` | `CliChannel` | `session`, `agent`, `resume_last`, `show_thinking` (exclusive; reads an optional `"cli.terminal"` service) |
+
+Session-scope plugins loaded by `SessionManager.open` (not used directly in `ventri.yml`):
+`permission.gate` (provides `Grants`, intercepts `ToolCheck`), `context.context_builder` (`ContextBuilder`),
+`loop.agent_loop` (`AgentLoop`; replaceable per agent preset with `agents: {name: {loop: "<use>"}}`).
+Top-level `agents: {name: {persona, tools: [globs], route, loop, memory_k}}` in `ventri.yml` defines presets.
+
+### Types
+
+- `messages`: `Message` (`system/user/assistant/tool` builders, `to_api()`, `to_json()/from_json()`), `ToolCall`,
+  `Usage` (`prompt_tokens, completion_tokens, cache_hit, cache_miss, reasoning_tokens`, `hit_rate`, `+`), `Money`,
+  `ChatRequest`, events `ReasoningDelta`, `ContentDelta`, `ToolCallStart`, `Done(message, usage, finish_reason, model)`.
+- `providers.base`: `ModelProvider` protocol (`name, caps, routes, caps_for(model), route(name), stream(req), price(usage, at, model)`),
+  `ModelCaps`, `Route` (`request(messages, **kw)`), `ProviderError(status, retryable, body)` > `RequestInvalid` > `ReasoningContentMissing`,
+  `collect(stream)`, `complete_json(provider, req, Model)`.
+- `providers.pricing`: `PriceTable` (`price`, `lookup`, `from_config`), `ModelPrice`, `PeakSchedule` (`is_peak`, `next_off_peak`).
+- `tools.registry`: `Tool(name, description, handler, params, risk, idempotent, parallel_safe, default_action, default_allow,
+  grantable, subject, untrusted, timeout)`, `Risk` (`READ < WRITE_LOCAL < EXTERNAL < IRREVERSIBLE < SPEND`), `ToolError`,
+  `ToolContext`, `ToolRegistry` (`register(ctx, tool)` -- unregistered with the fiber, `get`, `select(globs)`, `version`, `watch`),
+  `tool_schema(model, strict=True)`.
+- `permission`: `ToolRequest`, `ToolCheck` (event), `Policy.decide`, `Rule`, `Grants`, `ApprovalBroker` (`bind(session, channel, ask)`,
+  `request`, `verify`), `ApprovalRequest`, `ApprovalDecision`, `ApprovalRequested` (event), `AuditLog`.
+- `loop`: `AgentLoop` (`turn(text, sink, plan=False) -> TurnResult`, `retry`, `compact`, `extract_memories`), `TurnEvent`
+  (`turn.start | reasoning | content | tool.call | tool.start | tool.end | notice | error | turn.end`), `TurnResult`,
+  events `MessageIn` / `AgentOutput`.
+- `sessions`: `SessionManager` (`open(id=None, agent=, channel=, origin=)`, `get`, `suspend`, `end`, `list`, `last_id`,
+  `sweep_idle`, `sweep_retention`), `Session` (`turn`, `retry`, `suspend`, `end`, `alive`, `loop`, `ctx`), `SessionError`.
+- `session`: `SessionLog` (JSONL; `replay(path) -> Replay`), `SessionInfo`, `AgentPreset`, `Budget` / `BudgetLimits`.
+- `memory`: `LongTermMemory` (`add, update, confirm, forget, get, list, search, top, export_markdown, import_markdown`),
+  `WorkingMemory`, `MemoryItem`.
+
+### Session log records (`~/.ventri/sessions/<id>.jsonl`)
+
+`meta`, `prefix` (epoch: system, memory, tool names, tools, strict, hash), `msg`, `compact` (drop, summary), `usage`
+(model, route, usage, cost_usd, peak, finish), `turn`, `work`, `state` (`resumed | suspended | ended | memory`).
+Every record has `t` and `ts`. Append-only; a torn last line is skipped on replay.
+
+### CLI
+
+`va init [--force] [--no-key]`, `va chat [--config] [--profile]... [--session ID | --continue] [--agent] [--fake SCRIPT]
+[--show-thinking] [--no-watch]`, `va sessions [--json]`, `va cost [--days N] [--json]`,
+`va memory list|pending|search Q|confirm ID|forget ID|export [-o F]|import F`, `va tree [--config]`, `va doctor [--config]`.
+`serve / propose / history / rollback / reload` exit 2 (later milestones). `VENTRI_HOME` overrides `~/.ventri`.

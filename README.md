@@ -13,7 +13,11 @@ Ventri 是一个插件内核，核心创新有两点：
 stop-first 替换、dry-run 事务与 `TxReport`、加载超时与重试、依赖环/缺失提供者诊断、签名注入与 `ventri stubgen`、
 `Secret[T]`、事件优先级/类型化事件/拦截器、trace schema v1 与 JSONL sink。
 
-设计为原创实现（只借鉴 cordis 的语义），后续作为 DeepSeek 个人 Agent 的底座。
+设计为原创实现（只借鉴 cordis 的语义），作为 DeepSeek 个人 Agent 的底座。
+
+**M2（Agent MVP，`ventri-agent 0.2.0a1`）** 在内核之上实现了 **Ventri Agent**：DeepSeek 优先的个人助理，命令 `va`。
+Agent 的每一部分都是普通插件：模型适配器、工具、权限引擎、记忆、会话（每个会话是一个隔离的内核 scope）、CLI 渠道，
+因此热改配置、会话隔离、`/tree` 诊断都直接来自内核（见下文 [Ventri Agent](#ventri-agentm2va)）。
 
 > **项目路线与完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)；API 参考见 [`docs/api.md`](docs/api.md)。**
 > 许可证：MIT（见 [`LICENSE`](LICENSE)）。要求 Python 3.12+；1.0 只面向 macOS，但内核代码与平台无关（Linux 上同样测试）。
@@ -55,6 +59,48 @@ async with Kernel() as app:
     print(app.tree())
 ```
 
+## Ventri Agent（M2，`va`）
+
+```bash
+uv sync
+uv run va init                      # ~/.ventri：ventri.yml、personas/、workspace/；macOS 上把 API key 存进钥匙串
+export DEEPSEEK_API_KEY=...         # 其他平台（或 ventri.yml 里 api_key: ${secret:deepseek}）
+uv run va chat                      # 流式输出、思考折叠、内联审批；/help 查看斜杠命令
+uv run va chat --fake script.json   # 离线：脚本化假模型（演示 / 测试，不需要 key）
+uv run va chat --continue           # 恢复最近的会话（进程重启后同样可恢复）
+uv run va sessions | va cost | va memory list|pending|search|confirm|forget|export|import | va tree | va doctor
+```
+
+```
+── session 20261008-145145-aad9 (new) · agent default · deepseek-flash thinking high · 19 tools ──
+> 帮我在工作区写个 hello.md
+  ▸ thought (41 chars)
+  ⚙ fs.write path=~/.ventri/workspace/hello.md
+  [approval] fs.write path=~/.ventri/workspace/hello.md  (write-local)
+    args: {"path": "hello.md", "content": "# hello\n", "mode": "create"}
+    [y] allow once  [s] allow for this session  [n] deny
+    approve? y
+    ✓ wrote 8 chars to ~/.ventri/workspace/hello.md (create)
+已写入 hello.md。
+  [turn 2 · 2 steps · 1 tools · in 5.6k (cache 99%) · out 33 · $0.0001 / ¥0.001]
+```
+
+| 组件 | 模块 | 要点 |
+|---|---|---|
+| ModelProvider | `providers/` | DeepSeek 适配器（`deepseek-flash` / `deepseek-v4-pro`；思考模式与 effort；带工具时 `reasoning_content` 回传的本地校验；strict 工具走 `/beta`；JSON 输出 + 一次修复重试；SSE 流式；`usage` 缓存命中；峰谷计价；按模型并发上限；429/5xx 指数退避并遵守 `Retry-After`，只在首个事件之前重试；`/models` 探测）；通用 OpenAI 兼容适配器；离线 `fake`（模拟 DeepSeek 前缀缓存） |
+| 路由 | `routes:` | `default`（flash，思考 high）、`plan`（Pro，max；`/think max` 作为独立子调用）、`cheap`（flash，非思考：压缩、记忆抽取） |
+| ContextBuilder | `context.py` | ① system ② 工具（按名排序、规范 JSON）③ 记忆快照 ④ 只追加的历史 ⑤ 尾部块（时间、通知、计划）追加进历史、永不改写；epoch 冻结 ①–③ 并写入会话日志；工具集变化在下一 epoch 生效；60% 软上限时压缩一次；>8K token 的工具结果存为工件 |
+| AgentLoop | `loop.py` | 预算（步数、工具调用、token、¥、墙钟）；工具崩溃/超时 → `ERROR` 结果；模型错误不丢会话（`/retry`）；只读且 `parallel_safe` 的调用并发；不可信输出加围栏 |
+| 工具 | `tools/` | `fs.*`（限定 roots、真实路径）、`shell.run`（每次审批）、`web.fetch`（默认询问，`allow_domains` 可放行；无 web 搜索）、`notes.*`、`time.now`、`artifact.read`、`work.*`、`memory.*`、`inspect.*`；工具名在线上为 `fs__read` |
+| 权限 | `permission.py` | 风险 read < write-local < external < irreversible < spend；规则 → 工具默认 → read 放行/其余询问；irreversible+ 永远询问且不可“本会话允许”；批准只能来自渠道（HMAC 令牌）；无渠道/超时 = 拒绝；无门禁 = 拒绝；`audit.jsonl` |
+| 记忆 | `memory.py` | SQLite FTS5（trigram，中文可用）；去重合并；敏感项待确认；Markdown 导出/导入；会话结束时用 cheap 路由抽取 |
+| 会话 | `sessions.py` | 每个会话 = `scope session:<id>`（隔离 SessionInfo/Budget/Grants/ContextBuilder/AgentLoop…）；JSONL 日志；空闲 30 分钟挂起、7 天保留后结束；崩溃 = 挂起，可从日志恢复 |
+| CLI | `channels/cli.py`、`cli.py` | `/think /cost /tree /memory /epoch /compact /retry /sessions /end /suspend /exit` |
+
+实测（2026-10-08，真实 API，`pytest -m live`）：6 轮 Agent 会话输入缓存命中率 **74.8%**，成本 $0.0011；
+30 个个人任务评测（`uv run python -m evals.agent.run`）通过 **29/30（96.7%）**，总成本 $0.041。
+费用数据以 `usage` 为准；`va cost` 输出每日报表（命中率、峰/谷调用数、USD/CNY）。
+
 ## 仓库结构（uv workspace）
 
 | 路径 | 内容 |
@@ -68,7 +114,9 @@ async with Kernel() as app:
 | &nbsp;&nbsp;`diagnose.py` | 依赖诊断（Tarjan SCC 找环、缺失/失败提供者） |
 | &nbsp;&nbsp;`events.py` / `secret.py` / `trace.py` / `observe.py` | `Event[T]`/`Deny`/`Rewrite`；`Secret[T]` 与打码；trace schema v1；`snapshot()`/`tree()` |
 | `packages/ventri-std/src/ventri_std/` | **L1 标准插件**：`config.py`（声明式配置加载器）、`trace.py`（JSONL sink）、`stubgen.py`、`cli.py`（`ventri` 命令） |
-| `tests/` | 内核测试；`tests/std/` 为 ventri-std 测试；含 hypothesis 属性测试与混沌测试 |
+| `packages/ventri-agent/src/ventri_agent/` | **Ventri Agent**：`providers/`、`tools/`、`permission.py`、`memory.py`、`session.py`/`sessions.py`、`context.py`、`loop.py`、`channels/cli.py`、`cli.py`（`va`） |
+| `tests/` | 内核测试；`tests/std/` 为 ventri-std 测试；`tests/agent/` 为 Agent 测试（假模型 + httpx MockTransport；`-m live` 为真实 API 契约测试）；含 hypothesis 属性测试与混沌测试 |
+| `evals/agent/` | 30 个个人任务评测集与运行器（M2 退出标准） |
 | `benchmarks/bench_kernel.py` | 4.13 性能目标基准（结果见 [`docs/benchmarks.md`](docs/benchmarks.md)） |
 | `docs/` | `DESIGN.md`、`api.md`、`trace-schema.md`（+ JSON Schema）、`benchmarks.md` |
 
@@ -204,13 +252,20 @@ M1 没有守护进程控制通道，所以 `ventri apply` 不带 `--dry-run` 会
 
 ## 测试
 
-`pytest` + anyio 插件，只在 **asyncio** 上运行。共 150+ 个测试：M0 的 24 个 + 作用域/锁/注入/超时重试/诊断/dry-run/stop-first/
+`pytest` + anyio 插件，只在 **asyncio** 上运行。内核与 ventri-std 共 150+ 个测试：M0 的 24 个 + 作用域/锁/注入/超时重试/诊断/dry-run/stop-first/
 事件/Secret/trace/JSONL/配置/CLI/stubgen（含 pyright `--strict` 检查 `ctx.llm` 的类型）测试、hypothesis 属性测试
 （随机事务程序回滚后快照不变、作用域隔离与回收、事件顺序、配置 diff 收敛）、以及覆盖作用域与事务的混沌测试
 （`VENTRI_CHAOS_SEEDS=1000 uv run pytest tests/test_chaos.py`，1000 个种子已验证）。在 Python 3.12 / 3.13 / 3.14 上通过。
+
+Agent 测试（`tests/agent/`，116 个离线 + 8 个 live）默认全部离线：DeepSeek 适配器针对 httpx `MockTransport` 的 SSE 流测试，Agent 循环用脚本化
+假模型（同时模拟 DeepSeek 的前缀单元缓存，用于验证 ≥ 70% 命中率）；红队用例让假模型“完全服从”注入内容，验证零未批准的
+write-local 及以上动作。真实 API 契约测试只在设置 `DEEPSEEK_API_KEY` 时运行（`uv run pytest -m live -s`，每次 < $0.01），
+并由 `.github/workflows/deepseek-contract.yml` 每晚（北京时间 01:30，谷时）运行。
 
 ## 已知限制
 
 - 插件**源码**修改不会被检测（开发模式代码重载不在 M1）；OpenTelemetry 导出与配置目录 git 账本在 M3；沙箱不在 M1；
 - `ventri apply` 无守护进程通道（见上）；
 - 只支持 asyncio；1.0 只支持 macOS（CI 以 macOS 为主，Linux 做回归）。
+- Agent（M2）：飞书渠道与本地 Web UI 在 M4；MCP、沙箱、Skills、例行任务与自我演化在 M3（`va propose/history/rollback/serve`
+  已保留并以退出码 2 提示）；`shell.run` 不是沙箱（只限工作目录、超时、剥离敏感环境变量）；没有待审批队列（无渠道 = 拒绝）。

@@ -916,6 +916,31 @@ gantt
 - [ ] 工具崩溃 / MCP 断开 / 模型 5xx 不导致会话丢失；进程重启后会话可恢复；
 - [ ] DeepSeek 契约测试（夜间、真实 API、小额预算）连续 7 天通过。
 
+#### M2 实施说明（2026-10-08）
+
+交付见 `packages/ventri-agent`（`va`）。实现中对设计做了以下细化或调整（每条附原因）：
+
+1. **DeepSeek API 复核（2026-10-08，api-docs.deepseek.com）与 5.2 的差异**：
+   - `reasoning_effort` 还接受 `none`（关闭思考），并把 `minimal→low`、`medium/xhigh→high`、`ultra→max` 映射；适配器只接受 `low/high/max/none`。
+   - `max_tokens` 未设时默认非思考 8K、思考 64K、`max` 128K；路由可设 `max_tokens`。`frequency/presence_penalty` 已废弃；`top_p` 只在思考模式生效（0.95–1.0）。
+   - 新参数 `user_id`（KV 缓存与调度隔离）→ `DeepSeekConfig.user_id`。`finish_reason` 另有 `insufficient_system_resource` / `aborted`：适配器视为**可重试错误**而非答案（否则截断的回答会被当成最终结果）。
+   - 函数名只允许 `[A-Za-z0-9_-]`（≤128）：工具在线上以 `fs__read` 形式出现，注册表双向映射；工具名仍以 `fs.read` 为准（权限规则、审计、UI）。
+   - strict 模式文档列出的类型不含 `null`，但实测 `anyOf [T, {"type":"null"}]` 被接受（可选参数即用此表达）；文档支持 `$ref/$def`，生成器仍内联（更稳妥）。
+   - **实测与文档不符**：思考 + 工具的后续请求省略 `reasoning_content` 时，真实 API 返回 **200** 而非文档所述 400（flash、pro 均如此）。本地校验（`ReasoningContentMissing`）保留：既符合文档，也是缓存前缀逐字节一致的前提。`tool_choice=required` + 思考 → 400，与文档一致。
+   - `/models` 返回 `context_window`、`max_output_tokens`、`input_modalities`、`effort.supported_levels`，适配器启动时据此刷新能力描述符并告警未知/旧模型名；`deepseek-chat/reasoner` 在配置期直接报错。V4-Pro 在 2026-09-14 后继续提供（2026-09-10 changelog）。
+   - 缓存命中实测以 128 token 为粒度；流式 `usage` 只在最后一个 chunk 上（无单独 usage chunk），`prompt_tokens = hit + miss`。
+2. **尾部块追加进历史**：5.3 的 ⑤ 尾部块（时间、工具集变化通知、规划结论、预算提示）以带 `meta.tail` 的 system 消息**追加进历史并写入日志**，而不是每次请求末尾重新生成。原因：DeepSeek 只有完全匹配已持久化前缀单元才命中，任何“只在本次请求出现”的尾部都会让下一次请求不再扩展上一次。时间块最多每 10 分钟一条，并携带当前峰/谷计价状态（评测中发现模型否则会用陈旧知识回答计价问题）。测试断言每次请求都严格扩展上一次请求。
+3. **工具集变化**：新工具在下一 epoch 生效（`/epoch`、压缩或新会话），被卸载的工具**立即**不可调用（返回错误结果，提示已在通知中）——即使旧 epoch 的工具列表里还有它。
+4. **权限细化**：会话门禁拦截器以最低优先级运行，决定的是其他拦截器改写后的**最终**请求（批准的参数 = 执行的参数）；AgentLoop 失败关闭——没有任何门禁给请求盖章（`approved_by`）就拒绝，包括只读工具。“本会话允许”按**工具名**授予，不覆盖 irreversible/spend 与 `shell.run`。`shell.run` 定为 `external` 且不可授予（命令可做任何事）；`web.fetch` 风险为 read，但默认**询问**（URL 本身可外泄数据），`allow_domains` 放行。M2 没有待审批队列：会话没有绑定渠道（例如无人值守）即拒绝。不可信工具输出用 `<tool-output trust="untrusted">` 围栏，且转义数据中的闭合标签。
+5. **会话与热改**：会话状态（日志回放结果）通过隔离的 `Replay` 服务传给会话内插件，而不是插件配置（`tree()` 保持干净）。SessionManager 依赖 ModelProvider/ToolRegistry，替换 provider 会重启管理器并拆除会话 scope；CLI 渠道**惰性查找**服务并从 JSONL 日志恢复会话（与崩溃恢复同一路径），因此热改模型配置不会丢会话。
+6. **规划子调用**：`/think max` 让下一条消息先由 `plan` 路由（Pro + max）做一次不带工具的独立子调用，结论作为尾部块注入；`/think low|high|off` 只改主路由的请求参数（不改前缀，不破坏缓存）。
+7. **strict 工具默认关闭**（`strict_tools: false`，因其在 Beta 端点）；生成的 schema 始终 strict 兼容，开关只决定是否走 `/beta` 并加 `strict: true`。真实 API 上两种模式都已验证。
+8. **记忆抽取时机**：会话结束（`/end`、`/exit`、EOF、7 天保留期扫除）时用 cheap 路由 + JSON 输出抽取一次；敏感项 `pending`，`/memory pending` / `va memory confirm` 确认。
+9. **测试与评测**：默认测试全部离线（httpx `MockTransport` + 脚本化假模型；假模型模拟 DeepSeek 前缀单元缓存）；`-m live` 契约测试仅在设置 `DEEPSEEK_API_KEY` 时运行，并加了夜间 CI 工作流（北京时间 01:30 谷时）。30 个个人任务评测在 `evals/agent/`。
+10. **不在 M2**：MCP 桥（M3，因此未加 `mcp` 依赖，退出标准中的“MCP 断开”一项随 M3 验收）、图片输入与视觉路由、FIM / 对话前缀续写、Responses 格式、OTel；`va serve/propose/history/rollback` 保留并以退出码 2 提示。PyPI 未发布（需要 Jeff 操作）。
+
+**退出标准当前状态（2026-10-08）**：缓存命中——真实 API 6 轮会话 74.8%（假模型模拟 8 轮 94.8%），`va cost` 每日报表已有；红队——15 个用例（8 种注入载荷 × 拒绝、无渠道、围栏逃逸、授权越级、改写诱导、模型文本冒充批准）零未批准动作（离线、模型“完全服从”的最坏情况）；工具崩溃/模型 5xx/进程重启——测试覆盖，会话不丢且可恢复（MCP 部分随 M3）；个人评测集——30 个任务首次真实运行 29/30（96.7%），修正后复跑失败项通过；契约测试——已全部通过一次，“连续 7 天”需夜间工作流运行（需要仓库 secret）；Jeff 两周自用——未开始。
+
 ### M3 — 沙箱 + 自我演化 + MCP（估算 9–10 周）
 
 交付：卫星子进程运行时（同语义微内核 + JSON-RPC）；能力清单与代理；macOS 沙箱后端（sandbox-exec + Seatbelt 配置 + rlimit；T2 无网络）；MCP 桥（stdio + Streamable HTTP）；Skills；调度器与例行任务（谷时延后）；日历工具；演化管理器（提案、静态检查、dry-run/沙箱试运行、演练模式、审批、账本、回滚、观察期）；OTel 导出；可选 Responses 格式适配。
