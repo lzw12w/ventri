@@ -509,10 +509,12 @@ class TestConfinement:
                 await t(name, **args)
         assert (tmp_path / "secret.txt").read_text() == "secret\n" and not (tmp_path / "new.txt").exists()
 
-    async def test_unicode_variant_outside_roots_not_followed(self, t: FS, root: Path) -> None:
+    async def test_unicode_variant_filename_resolves(self, t: FS, root: Path) -> None:
         (root / "caf\u00e9.txt").write_text("nfc\n")
+        fs_normalizes = (root / "cafe\u0301.txt").exists()   # APFS/HFS+ are normalization-insensitive
         out = await t("read", path="cafe\u0301.txt")       # NFD spelling of the same name
-        assert "1|nfc" in out and "unicode-equivalent" in out
+        assert "1|nfc" in out
+        assert fs_normalizes or "unicode-equivalent" in out
 
 
 class TestAtomicWrite:
