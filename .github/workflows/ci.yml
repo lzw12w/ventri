@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: macOS / Python ${{ matrix.python }}
+    runs-on: macos-latest   # 1.0 targets macOS: this is the primary job
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --python ${{ matrix.python }} --locked
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Tests (asyncio only; includes the pyright --strict stub test)
+        run: uv run pytest -q
+      - name: Chaos (200 seeds)
+        if: matrix.python == '3.12'
+        env:
+          VENTRI_CHAOS_SEEDS: "200"
+        run: uv run pytest -q tests/test_chaos.py
+      - name: Benchmarks (informational)
+        if: matrix.python == '3.12'
+        run: uv run python benchmarks/bench_kernel.py || true
+
+  linux:
+    name: Linux regression / Python 3.12
+    runs-on: ubuntu-latest  # the kernel stays platform-neutral
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --python 3.12 --locked
+      - run: uv run ruff check .
+      - run: uv run pytest -q
