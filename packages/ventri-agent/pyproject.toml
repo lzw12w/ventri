@@ -1,0 +1,35 @@
+[project]
+name = "ventri-agent"
+version = "0.2.0a1"
+description = "Ventri Agent: a DeepSeek-first personal agent on the Ventri kernel (the `va` CLI)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jeff" }]
+dependencies = ["ventri==0.2.0a1", "ventri-std==0.2.0a1", "httpx>=0.27", "pydantic>=2.7"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "License :: OSI Approved :: MIT License",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+# Reserved extras (DESIGN.md section 7). MCP (`mcp`) arrives with the bridge in M3.
+web = []
+feishu = []
+vec = []
+
+[project.scripts]
+va = "ventri_agent.cli:main"
+
+[project.urls]
+Repository = "https://github.com/lzw12w/ventri"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ventri_agent"]

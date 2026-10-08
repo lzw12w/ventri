@@ -3,7 +3,7 @@
 name = "ventri-workspace"
 version = "0.2.0a1"
 requires-python = ">=3.12"
-dependencies = ["ventri", "ventri-std"]
+dependencies = ["ventri", "ventri-std", "ventri-agent"]
 
 [dependency-groups]
 dev = [
@@ -23,11 +23,12 @@ members = ["packages/*"]
 [tool.uv.sources]
 ventri = { workspace = true }
 ventri-std = { workspace = true }
+ventri-agent = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Lets `pytest` run straight from a checkout even without `uv sync`.
-pythonpath = [".", "packages/ventri/src", "packages/ventri-std/src"]
+pythonpath = [".", "packages/ventri/src", "packages/ventri-std/src", "packages/ventri-agent/src"]
 
 [tool.ruff]
 target-version = "py312"
@@ -40,4 +41,4 @@ extend-exclude = ["docs/build"]
 "examples/**" = ["T201"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["ventri", "ventri_std"]
+known-first-party = ["ventri", "ventri_std", "ventri_agent"]
