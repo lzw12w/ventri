@@ -19,6 +19,7 @@ from .fiber import Fiber, State, TaskHandle
 from .kernel import Binding, Kernel, Realm, TraceEvent
 from .plugin import Retry, plugin
 from .report import TxReport
+from .secret import Secret, redact
 from .transaction import Transaction
 
 __version__ = "0.2.0a1"
@@ -37,6 +38,7 @@ __all__ = [
     "Realm",
     "Retry",
     "Rewrite",
+    "Secret",
     "ServiceConflict",
     "ServiceNotFound",
     "State",
@@ -49,4 +51,5 @@ __all__ = [
     "TransactionTimeout",
     "TxReport",
     "plugin",
+    "redact",
 ]

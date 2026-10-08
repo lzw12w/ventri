@@ -4,20 +4,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .plugin import keyname
+from .secret import redact
 
 if TYPE_CHECKING:  # pragma: no cover
     from .fiber import Fiber
     from .kernel import Kernel
-
-
-_SECRET = ("key", "token", "secret", "password")
-
-
-def _redact(config: Any) -> Any:
-    if isinstance(config, dict):
-        return {k: "***" if any(w in str(k).lower() for w in _SECRET) else v
-                for k, v in config.items()}
-    return config
 
 
 def snapshot(kernel: Kernel) -> dict[str, Any]:
@@ -34,7 +25,7 @@ def snapshot(kernel: Kernel) -> dict[str, Any]:
             "name": f.name,
             "state": f.state.value,
             "staged": f.parent is not None and f.tx is not None,
-            "config": _redact(f.raw_config),
+            "config": redact(f.raw_config),
             "inject": [keyname(k) for k in f.inject],
             "optional": [keyname(k) for k in f.optional],
             "scope": f.is_scope,
