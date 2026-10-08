@@ -299,6 +299,8 @@ def _preview(args: Any, limit: int = 600) -> str:
 
 
 # ------------------------------------------------------------------- plugins
+GATE_PRIORITY = -1_000_000
+
 class PermissionConfig(BaseModel):
     rules: list[Rule] = Field(default_factory=list)
     approval_timeout: float = 120.0
@@ -318,7 +320,9 @@ def permission(ctx: Any, cfg: PermissionConfig) -> None:
 def gate(ctx: Any, config: Any, policy: Policy, broker: ApprovalBroker, audit: AuditLog) -> None:
     """Session-scope plugin: provides ``Grants`` and intercepts ``ToolCheck``."""
     grants = ctx.provide(Grants, Grants())
-    ctx.intercept(ToolCheck, PermissionGate(ctx, policy, broker, grants, audit))
+    # Lowest priority: the gate decides on the *final* request, after any other
+    # interceptor rewrote it, so an approval always covers exactly what runs.
+    ctx.intercept(ToolCheck, PermissionGate(ctx, policy, broker, grants, audit), priority=GATE_PRIORITY)
     ctx.on_dispose(grants.revoke)
 
 

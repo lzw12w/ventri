@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -38,6 +39,17 @@ def clean_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not sensitive(k)}
 
 
+def _kill_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill the command and everything it started (it runs in its own session)."""
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:  # pragma: no cover - non-POSIX
+            proc.kill()
+    except ProcessLookupError:
+        pass
+
+
 def make_tool(cfg: ShellConfig) -> Tool:
     base = Path(os.path.realpath(expand(cfg.cwd)))
 
@@ -52,7 +64,7 @@ def make_tool(cfg: ShellConfig) -> Tool:
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=min(a.timeout, cfg.timeout))
         except (TimeoutError, asyncio.CancelledError):
-            proc.kill()
+            _kill_group(proc)
             await proc.wait()
             raise ToolError(f"command timed out after {min(a.timeout, cfg.timeout)}s") from None
         text = out.decode("utf-8", "replace")
