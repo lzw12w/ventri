@@ -46,9 +46,11 @@ from .session import (
     list_sessions,
     session_paths,
 )
+from .tools._hermes_fs.state import FileState
 from .tools.registry import ToolRegistry
 
-SESSION_KEYS = (SessionInfo, SessionLog, Budget, WorkingMemory, Grants, ContextBuilder, AgentLoop, Replay)
+SESSION_KEYS = (SessionInfo, SessionLog, Budget, WorkingMemory, Grants, ContextBuilder, AgentLoop, Replay,
+                FileState)
 
 
 class SessionError(Exception):
@@ -69,6 +71,10 @@ def _core(info: SessionInfo, replay: Replay, limits: BudgetLimits) -> Any:
         ctx.provide(Replay, replay)
         ctx.provide(Budget, Budget(limits))
         ctx.provide(WorkingMemory, WorkingMemory(replay.work))
+        # read-before-write / stale-file state of the file tools (fs.*, notes.*),
+        # scoped to this session and dropped when the session scope is disposed
+        files = ctx.provide(FileState, FileState(info.id))
+        ctx.on_dispose(files.close)
         if not info.resumed:
             log.append("meta", id=info.id, agent=info.agent.name, channel=info.channel, origin=info.origin)
         else:

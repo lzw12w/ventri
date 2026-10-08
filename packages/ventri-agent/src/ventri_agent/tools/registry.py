@@ -55,7 +55,15 @@ Action = Literal["allow", "ask", "deny"]
 
 
 class ToolError(Exception):
-    """Raised by a handler to return a clean error message to the model."""
+    """Raised by a handler to return a clean error message to the model.
+
+    ``untrusted`` carries optional detail quoted from outside data (e.g. the
+    file lines a failed edit matched); the loop appends it fenced as untrusted
+    data, so a file cannot smuggle instructions in through an error message."""
+
+    def __init__(self, message: str, *, untrusted: str | None = None) -> None:
+        super().__init__(message)
+        self.untrusted = untrusted
 
 
 @dataclass
