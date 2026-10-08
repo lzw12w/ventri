@@ -194,3 +194,29 @@ async def test_outer_cancellation_is_not_reported_as_timeout():
             async with app.transaction(timeout=10) as tx:
                 await anyio.sleep(1)
         assert scope.cancelled_caught and tx.state == "rolled_back"
+
+
+async def test_concurrent_session_transactions_conflict_on_root_keys_at_commit():
+    """Documented non-guarantee (DESIGN 8, M1 note 5): session transactions only share the
+    root lock, so two of them staging the same *root-realm* key are not serialized --
+    the second to commit fails with TransactionConflict and rolls back."""
+    from ventri import TransactionConflict, TransactionError
+
+    async with Kernel() as app:
+        a, b = await app.scope("a"), await app.scope("b")
+        res = {}
+
+        async def run(s, name, delay):
+            try:
+                async with s.ctx.transaction() as tx:
+                    await tx.plugin(lambda ctx, config: ctx.provide("cache", name))
+                    await anyio.sleep(delay)
+                res[name] = "ok"
+            except TransactionError as e:
+                res[name] = e
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run, a, "a", 0.01)
+            tg.start_soon(run, b, "b", 0.05)
+        assert res["a"] == "ok" and isinstance(res["b"], TransactionConflict)
+        assert app.get("cache") == "a" and len(b.children) == 0

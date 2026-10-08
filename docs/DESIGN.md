@@ -284,7 +284,7 @@ stateDiagram-v2
 
 ### 4.4 结构化并发模型
 
-- **任务树 = 插件树**。Fiber 激活时在**父 fiber 的 task group** 中启动宿主任务，宿主任务内开自己的 task group；`ctx.spawn` 的任务都在其中，各有独立 `CancelScope`，并作为 effect 入栈。
+- **任务归属 = 插件树**。`ctx.spawn` 的任务各有独立 `CancelScope`，并作为“取消并等待”的 effect 压入所属 fiber 的栈，卸载时与其他 effect 按 LIFO 交错执行。*（M1 实施说明：M0 中每个 fiber 还在父 fiber 的 task group 里启动一个宿主任务、内开自己的 task group 作兜底；由于任务本来就由 effect 拥有，M1 去掉了宿主任务，任务直接在 Kernel 的 task group 中运行——每个空 fiber 约省 6 KB，才达到 4.13 的 8 KB 目标；归属、拆除顺序与异常归属语义不变。）*
 - **异常归属（supervisor 语义）**：spawn 任务抛异常 → 所属 fiber 被拆除并置 `FAILED`；兄弟与 Kernel 不受影响。
 - **重入安全**：每个 fiber 一把锁并记录持锁任务；加载中被 dispose、自我 dispose、在自己 spawn 的任务里 dispose 自己，均不死锁、不泄漏。
 - **取消即不泄漏**：调用 `await ctx.plugin(...)` 的任务被取消，正在加载的 fiber 被完整拆除。
@@ -335,7 +335,7 @@ sequenceDiagram
 | G1 原子性 | live 注册表只在一个同步步骤（无 `await`）内切换；任何观察者只能看到全部或全无 |
 | G2 隔离性 | 提交前 staged 服务对 live fiber 不可见；staged 监听器听不到外部事件；被移除/替换的 fiber 照常运行 |
 | G3 精确回滚 | apply 抛错、块内代码抛错、事务被取消、提交前校验失败 → 回滚后 `snapshot()` 与事务前**逐字段相等** |
-| G4 串行化 | 每个 Kernel 同时只有一个事务；`wait=True` FIFO 排队，`wait=False` 立即 `TransactionBusy`；嵌套报错 |
+| G4 串行化 | 每个 Kernel 同时只有一个事务；`wait=True` FIFO 排队，`wait=False` 立即 `TransactionBusy`；嵌套报错（M1 起细化为按 scope 加锁，见 4.5.4 与 4.6） |
 | G5 冲突检测 | 事务期间的非事务操作若与 overlay 冲突，提交时检出并回滚 |
 
 #### 4.5.3 不保证（写入文档与 API docstring）
@@ -887,6 +887,21 @@ gantt
 - [ ] 4.13 全部性能目标达成（或记录偏差并调整目标的 ADR）；
 - [ ] pyright strict 下 `ctx.llm` 有正确类型；
 - [ ] 内核 API 冻结为 0.2，写出 API 参考。
+
+#### M1 实施说明（2026-10-08）
+
+实现中对设计做了以下细化或调整（每条附原因）：
+
+1. **trace kind 增补**：内核另发 `kernel.start/stop`、`fiber.retry`；`tx.rollback` 带 `degraded` 属性（stop-first 降级回滚）；`ts` 为 Unix 纪元秒（UTC）。`fiber` 路径的每一段取配置 id（`meta["id"]`），否则取插件名——这样路径在重启间稳定。上层通过 `ctx.trace(kind, ...)` 发自定义 kind（内核 kind 保留）。原因：可观测性需要内核生命周期与重试事件；格式见 `docs/trace-schema.md`。
+2. **稳定 id 的“序号”**：同一父节点下第一个 `use: X` 的 id 就是 `X`，之后相同 `use` 的兄弟记为 `X@2`、`X@3`……。原因：在后面追加同类插件时，前面已有插件的 id 不变（不触发无谓的替换）。
+3. **拦截器语义**：`Rewrite(new)` 替换值后**继续**执行后续拦截器（而不是像 `serial` 那样在首个非 None 处停止）；拦截器抛错向上传播（fail closed）。由 `await ctx.check(event, value)` 执行。原因：权限引擎、审计、演练模式要能叠加。
+4. **realm 不向外回退**：某 scope 隔离了 key K、但 scope 内没有提供者时，K 视为缺失，不回退到外层 realm。原因：否则会话会悄悄用上全局实例，隔离变得不可预测。
+5. **会话事务与根 realm 键**：会话 scope 内的事务只持根的共享锁；若它提供的是未隔离（根 realm）的键，与其他并发事务的冲突在提交时以 `TransactionConflict` 检出并回滚，而不是事先阻止。另外，若事务期间它的 scope 或其中的 staged fiber 被外部回收，提交时以 `TransactionError` 回滚（混沌测试发现的缺陷，已修复）。
+6. **`ventri apply`**：M1 没有守护进程控制通道，`apply` 只支持 `--dry-run` / `--validate-only`；`ventri run` 在前台托管配置并热应用编辑。`apply/tree/doctor` 在一次性 Kernel 中以 dry-run 事务执行（插件会被实例化再拆除）。
+7. **配置加载器插件**（`use: ventri_std.config.loader`）把配置中的插件放在它的**父节点**下，只管理、不拥有：卸载加载器只停止监视。原因：fiber 路径保持 `root/<id>`，与 4.10 一致。
+8. **依赖**：`ventri-std` 依赖 `pyyaml`；secrets 默认读 macOS 钥匙串（`security`，服务名 `ventri`），回退到环境变量 `VENTRI_SECRET_<NAME>`。
+9. **命名 provides**：插件声明 `provides={"llm": ModelProvider}` 后，`ctx.provide(ModelProvider, v)` 自动获得名字 `llm`，因此 `ventri stubgen` 生成的 `ctx.llm` 类型在运行时同样可用。
+10. **不在 M1**：OpenTelemetry 导出与配置目录 git 账本（M3）、开发模式代码重载、`ctx.get` 字符串 key 的 lint 规则；PyPI 发布未执行（需要 Jeff 操作）。
 
 ### M2 — Agent MVP（CLI）（估算 7–8 周）
 
