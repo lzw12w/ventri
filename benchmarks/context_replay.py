@@ -7,9 +7,11 @@ The recorded assistant messages (reasoning, content, tool calls) are fed back
 through the real AgentLoop / ContextBuilder with the scripted FakeProvider, and
 every tool call returns its recorded result, so the only variable is the
 context policy. ``--trigger N`` lowers the compaction trigger to N tokens (by
-setting the fake model's soft context to N / the compaction trigger (0.6));
-``off`` is the default 256K soft context. Summary calls get a canned summary
-of ~2400 characters and are counted. FakeProvider simulates DeepSeek's prefix disk cache (a request
+setting the fake model's soft context to N / the preset's ``compact_at``).
+``never`` disables compaction (the old behaviour for a single long turn);
+``default`` is the default 256K soft context (trigger ~154K tokens). Summary
+calls get a canned summary of ~4400 characters (the size of a real progress summary) and are counted (cost, cache
+misses), not in ``max ctx``. FakeProvider simulates DeepSeek's prefix disk cache (a request
 hits the longest persisted prefix unit it extends) and estimates tokens with
 ``ventri_agent.tokens.estimate_tokens``; cost uses Ventri's DeepSeek price
 table at peak time. Absolute numbers differ from the API's tokenizer; the
@@ -30,11 +32,11 @@ import anyio
 
 import ventri
 from ventri import Kernel
-from ventri_agent.context import COMPACTION_TRIGGER
 from ventri_agent.messages import ChatRequest, Message, Usage
 from ventri_agent.permission import permission
 from ventri_agent.providers.base import ModelProvider
 from ventri_agent.providers.fake import FakeProvider, Step
+from ventri_agent.session import AgentPreset
 from ventri_agent.sessions import SessionManager, session_manager
 from ventri_agent.tools.registry import Risk, Tool, ToolRegistry
 from ventri_agent.tools.registry import plugin as registry_plugin
@@ -106,7 +108,7 @@ def script_and_tools(msgs: list[Message]) -> tuple[list[Step], dict[str, str], s
     return steps, results, names
 
 
-SUMMARY = ("## Goal\nBuild the extensions and verify.\n## Done so far\n" + "- step: ran a command, saw output\n" * 60
+SUMMARY = ("## Goal\nBuild the extensions and verify.\n## Done so far\n" + "- step: ran a command, saw output\n" * 120
            + "## Current state\nbuilding\n## Remaining plan\n- finish and verify\n")
 
 
@@ -127,9 +129,11 @@ class ReplayProvider(FakeProvider):
 async def replay(system: str, user: str, msgs: list[Message], trigger: int) -> dict[str, Any]:
     steps, results, names = script_and_tools(msgs)
     prov = ReplayProvider(steps)
-    if trigger:
-        from dataclasses import replace
-        prov._caps = replace(prov._caps, soft_context=int(trigger / COMPACTION_TRIGGER))
+    from dataclasses import replace
+    if trigger < 0:      # never: a trigger above the whole window
+        prov._caps = replace(prov._caps, soft_context=10**9, context=10**9)
+    elif trigger:
+        prov._caps = replace(prov._caps, soft_context=int(trigger / AgentPreset().compact_at))
 
     @ventri.plugin(name="provider:replay", provides={"llm": ModelProvider})
     def provider(ctx: Any, config: Any) -> None:
@@ -194,16 +198,17 @@ def main(argv: list[str] | None = None) -> int:
     if a.session is None and not a.synthetic:
         ap.error("give a session log or --synthetic")
     system, user, msgs = synthetic(a.steps) if a.session is None else load_session(a.session)
-    rows = [anyio.run(replay, system, user, msgs, t, backend="asyncio") for t in [0, *a.trigger]]
+    rows = [anyio.run(replay, system, user, msgs, t, backend="asyncio") for t in [-1, 0, *a.trigger]]
     if a.json:
         print(json.dumps(rows, indent=2))
         return 0
     base = rows[0]
-    print(f"{'trigger':>9} {'status':>7} {'steps':>5} {'prompt':>10} {'vs off':>7} {'hit':>6} {'miss':>9} "
+    print(f"{'trigger':>9} {'status':>7} {'steps':>5} {'prompt':>10} {'vs never':>7} {'hit':>6} {'miss':>9} "
           f"{'max ctx':>8} {'compact':>7} {'cost $':>8}")
     for r in rows:
         rel = r["prompt_tokens"] / base["prompt_tokens"] - 1 if base["prompt_tokens"] else 0
-        print(f"{r['trigger'] or 'off':>9} {r['status']:>7} {r['steps']:>5} {r['prompt_tokens']:>10} {rel:>+7.0%} "
+        label = {-1: "never", 0: "default"}.get(r["trigger"], r["trigger"])
+        print(f"{label:>9} {r['status']:>7} {r['steps']:>5} {r['prompt_tokens']:>10} {rel:>+9.0%} "
               f"{r['hit_rate']:>6.1%} {r['cache_miss']:>9} {r['max_context']:>8} {r['compactions']:>7} "
               f"{r['cost_usd']:>8.4f}")
     return 0

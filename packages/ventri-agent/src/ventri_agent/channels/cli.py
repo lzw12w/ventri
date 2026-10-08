@@ -354,7 +354,7 @@ class CliChannel:
             e = loop.builder.new_epoch(refresh_memory=True)
             self.term.write(f"epoch {e.n}: {len(e.tool_names)} tools ({', '.join(e.tool_names)})\n")
         elif cmd == "compact":
-            ok = await loop.compact(self.render)
+            ok = await loop.compact(self.render, force=True)
             self.term.write("compacted\n" if ok else "nothing to compact yet\n")
         elif cmd == "retry":
             self.results.append(await s.retry(self.render))

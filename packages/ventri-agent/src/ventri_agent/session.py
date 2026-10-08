@@ -8,7 +8,10 @@
   snapshot, tool names/specs): resuming rebuilds it byte-for-byte, so the
   disk cache keeps hitting after a restart
 * ``msg``      -- one history message (user / assistant incl. reasoning_content / tool / system tail)
-* ``compact``  -- ``drop`` leading history messages replaced by ``summary``
+* ``compact``  -- ``drop`` leading history messages replaced by ``summary``;
+  intra-turn compaction adds ``span`` (``[a, b)`` of the remaining history,
+  replaced by the ``progress`` summary), ``steps`` and ``trim`` (``[{seq,
+  content}]`` oversized kept tool results); see :func:`apply_compact`
 * ``prune``    -- written only by 0.2.0a1 development builds (removed context
   pruning); ignored on replay, so such a log loads with the full messages
 * ``usage``    -- one model call: model, route, usage, cost, peak flag
@@ -21,7 +24,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +45,9 @@ class AgentPreset:
     time_notes: bool | None = None         # current-time / peak-pricing notes (None: on, off when headless)
     mode: str = "interactive"              # "headless": only opened by unattended runs (`va run`)
     inline_tokens: int = 8_000             # a tool result above this is stored as an artifact (head + tail inline)
+    compact_at: float = 0.6                # compaction trigger, fraction of the model's soft context
+    compact_keep_turns: int = 4            # cross-turn compaction keeps the last N user turns
+    compact_keep_steps: int = 6            # intra-turn compaction keeps the last N model steps of the turn
 
 
 @dataclass
@@ -119,8 +125,7 @@ class SessionLog:
                     r.history.append(Message.from_json(rec["m"]))
                     r.total_messages += 1
                 elif t == "compact":
-                    drop = int(rec["drop"])
-                    r.history = [Message.system(rec["summary"], compacted=drop), *r.history[drop:]]
+                    r.history = apply_compact(r.history, rec)
                     r.compactions += 1
                 elif t == "prune":
                     pass  # removed feature (0.2.0a1 dev builds): keep the full, unedited messages
@@ -139,6 +144,27 @@ class SessionLog:
                     if "extracted_upto" in rec:
                         r.extracted_upto = int(rec["extracted_upto"])
         return r
+
+
+def apply_compact(history: list[Message], rec: dict[str, Any]) -> list[Message]:
+    """Apply one ``compact`` record (live and on replay, so a resumed session
+    rebuilds the same messages): drop the first ``drop`` messages in favour of
+    ``summary``; replace ``span`` = ``[a, b)`` of what remains (the earlier
+    steps of the current turn) with the ``progress`` summary; replace the
+    content of ``trim`` messages (by ``seq``)."""
+    drop = int(rec.get("drop") or 0)
+    rest = list(history[drop:])
+    span = rec.get("span")
+    if span:
+        a, b = int(span[0]), int(span[1])
+        rest = [*rest[:a], Message.system(str(rec.get("progress") or ""), compacted_steps=int(rec.get("steps") or 0)),
+                *rest[b:]]
+    trims = {int(t["seq"]): str(t["content"]) for t in rec.get("trim") or []}
+    if trims:
+        rest = [replace(m, content=trims[int(m.meta["seq"])], meta={**m.meta, "trimmed": True})
+                if m.meta.get("seq") is not None and int(m.meta["seq"]) in trims else m for m in rest]
+    head = [Message.system(str(rec.get("summary") or ""), compacted=drop)] if drop else []
+    return head + rest
 
 
 def read_usage(sessions_dir: Path) -> list[dict[str, Any]]:

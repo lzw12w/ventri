@@ -190,7 +190,14 @@ class SessionManager:
                                     memory_k=int(spec.get("memory_k", 12)),
                                     system_prompt=str(spec.get("system_prompt", "") or ""),
                                     time_notes=None if tn is None else bool(tn), mode=mode,
-                                    inline_tokens=int(spec.get("inline_tokens", 8_000)))
+                                    inline_tokens=int(spec.get("inline_tokens", 8_000)),
+                                    compact_at=float(spec.get("compact_at", 0.6)),
+                                    compact_keep_turns=int(spec.get("compact_keep_turns", 4)),
+                                    compact_keep_steps=int(spec.get("compact_keep_steps", 6)))
+            p = out[name]
+            if not 0.1 <= p.compact_at <= 0.95 or p.compact_keep_turns < 1 or p.compact_keep_steps < 1:
+                raise SessionError(f"agent preset {name!r}: compact_at must be in [0.1, 0.95] and "
+                                   "compact_keep_turns / compact_keep_steps >= 1")
         return out
 
     # --------------------------------------------------------------- open
