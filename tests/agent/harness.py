@@ -124,7 +124,8 @@ class Env:
     def __init__(self, tmp: Path, script: list[Any] | None = None, *, rules: list[dict[str, Any]] | None = None,
                  budget: dict[str, Any] | None = None, agents: dict[str, Any] | None = None,
                  provider: Any = None, memory: bool = True, approval_timeout: float = 5.0,
-                 extract_memory: bool = True, idle_timeout: float = 1800.0) -> None:
+                 extract_memory: bool = True, idle_timeout: float = 1800.0,
+                 unattended: dict[str, Any] | None = None) -> None:
         self.tmp = tmp
         self.provider = provider or FakeProvider(script or [])
         self.rules = rules or []
@@ -134,6 +135,7 @@ class Env:
         self.approval_timeout = approval_timeout
         self.extract_memory = extract_memory
         self.idle_timeout = idle_timeout
+        self.unattended = unattended or {}
         self.probe = Probe()
         self.choices: list[str] = []
         self.asked: list[ApprovalRequest] = []
@@ -145,7 +147,8 @@ class Env:
         await k.plugin(provider_plugin(self.provider))
         await k.plugin(registry_plugin)
         await k.plugin(permission, {"rules": self.rules, "audit": str(self.tmp / "audit.jsonl"),
-                                    "approval_timeout": self.approval_timeout})
+                                    "approval_timeout": self.approval_timeout,
+                                    "unattended": self.unattended})
         if self.with_memory:
             await k.plugin(memory_sqlite, {"path": str(self.tmp / "memory.db")})
         self.tools_fiber = await k.plugin(tools_plugin(self.probe))

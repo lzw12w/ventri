@@ -28,7 +28,7 @@ from .messages import Message, Usage, now_ts
 
 @dataclass
 class AgentPreset:
-    """``agents: {name: {persona, tools, route, loop}}`` in ventri.yml."""
+    """``agents: {name: {persona, tools, route, loop, ...}}`` in ventri.yml."""
 
     name: str = "default"
     persona: str = ""                      # file path (relative to ~/.ventri) or inline text
@@ -36,6 +36,12 @@ class AgentPreset:
     route: str = "default"
     loop: str | None = None                # alternative agent-loop plugin (``use`` string)
     memory_k: int = 12
+    system_prompt: str = ""                # file or inline text; replaces persona + built-in rules entirely
+    time_notes: bool | None = None         # current-time / peak-pricing notes (None: on, off when headless)
+    mode: str = "interactive"              # "headless": only opened by unattended runs (`va run`)
+    prune_tokens: int = 0                  # context pruning threshold (0: off), see ContextBuilder.prune
+    prune_keep: int = 6                    # most recent tool results never pruned
+    inline_tokens: int = 8_000             # a tool result above this is stored as an artifact (head + tail inline)
 
 
 @dataclass
@@ -48,6 +54,7 @@ class SessionInfo:
     origin: str = "user"
     created: float = field(default_factory=now_ts)
     resumed: bool = False
+    headless: bool = False                 # unattended run: no human; approvals by the configured policy
 
 
 @dataclass

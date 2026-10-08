@@ -1,7 +1,7 @@
 """``va`` -- the Ventri Agent command line (DESIGN.md 7).
 
-M2 commands: ``init``, ``chat``, ``sessions``, ``cost``, ``memory``, ``tree``,
-``doctor``. ``serve`` (M4), ``propose`` / ``history`` / ``rollback`` (M3) are
+M2 commands: ``init``, ``chat``, ``run``, ``sessions``, ``cost``, ``memory``,
+``tree``, ``doctor``. ``serve`` (M4), ``propose`` / ``history`` / ``rollback`` (M3) are
 reserved and exit with status 2.
 """
 from __future__ import annotations
@@ -112,6 +112,22 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--fake", metavar="SCRIPT", help="use the offline scripted model (JSON/YAML steps file)")
     c.add_argument("--show-thinking", action="store_true")
     c.add_argument("--no-watch", action="store_true", help="do not hot-apply config edits")
+    r = sub.add_parser("run", help="run one task non-interactively (headless only with --headless)",
+                       description="Run one task and exit. Without --headless nobody can approve anything: "
+                       "calls that need approval are denied (fail closed). --headless is the explicit opt-in "
+                       "to an unattended run: approvals follow permission.unattended in the config (default "
+                       "deny), the system prompt is the headless one (or the preset's system_prompt), time "
+                       "notes are off, and every decision is audited.")
+    r.add_argument("task", nargs="?", help="task text (default: --task-file, else stdin)")
+    r.add_argument("--task-file", type=Path, default=None)
+    r.add_argument("--config", type=Path, default=None)
+    r.add_argument("--profile", action="append", dest="profiles", default=None)
+    r.add_argument("--agent", "-a", default=None, help="agent preset (agents: in ventri.yml)")
+    r.add_argument("--session", "-s", default=None, help="session id (default: a new one)")
+    r.add_argument("--headless", action="store_true", help="unattended mode (see above)")
+    r.add_argument("--json", action="store_true", help="print the result as JSON on stdout")
+    r.add_argument("--quiet", "-q", action="store_true", help="no progress on stderr")
+    r.add_argument("--remember", action="store_true", help="extract long-term memories when the run ends")
     s = sub.add_parser("sessions", help="list sessions")
     s.add_argument("--json", action="store_true")
     co = sub.add_parser("cost", help="daily cost / cache report from the session logs")
@@ -135,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd in LATER:
         print(f"va {args.cmd}: not available in 0.2 (planned for {LATER[args.cmd]})", file=sys.stderr)
         return 2
-    fn = {"init": cmd_init, "chat": cmd_chat, "sessions": cmd_sessions, "cost": cmd_cost,
+    fn = {"init": cmd_init, "chat": cmd_chat, "run": cmd_run, "sessions": cmd_sessions, "cost": cmd_cost,
           "memory": cmd_memory, "tree": cmd_tree, "doctor": cmd_doctor}[args.cmd]
     from ventri_std.config import ConfigError
 
@@ -237,6 +253,85 @@ async def chat(args: argparse.Namespace, *, terminal: Any = None) -> int:
     if tmp is not None:
         tmp.unlink(missing_ok=True)
     return 0
+
+
+# ---------------------------------------------------------------------- run
+def cmd_run(args: argparse.Namespace) -> int:
+    if args.task is not None:
+        task = args.task
+    elif args.task_file is not None:
+        task = args.task_file.expanduser().read_text(encoding="utf-8")
+    elif not sys.stdin.isatty():
+        task = sys.stdin.read()
+    else:
+        print("va run: give the task as an argument, with --task-file, or on stdin", file=sys.stderr)
+        return 2
+    if not task.strip():
+        print("va run: empty task", file=sys.stderr)
+        return 2
+    return anyio.run(run_task, args, task, backend="asyncio")
+
+
+async def run_task(args: argparse.Namespace, task: str) -> int:
+    """One non-interactive turn. No channel is bound, so an ``ask`` is denied
+    unless the session is headless and ``permission.unattended`` allows it."""
+    import time
+
+    from ventri_std.config import Loader, load_document
+
+    from .sessions import SessionError, SessionManager
+
+    cfg_path = _config_path(args.config)
+    if not cfg_path.exists():
+        print(f"no configuration at {cfg_path}; run `va init` first", file=sys.stderr)
+        return 2
+    load_document(cfg_path, profiles=args.profiles)
+    t0 = time.monotonic()
+
+    def say(line: str) -> None:
+        if not args.quiet:
+            print(line, file=sys.stderr, flush=True)
+
+    async def sink(ev: Any) -> None:
+        if ev.kind == "tool.start":
+            say(f"  -> {ev.text[:200]}")
+        elif ev.kind == "tool.end":
+            say(f"  <- {(ev.text.splitlines() or [''])[0][:200]}")
+        elif ev.kind in ("notice", "error"):
+            say(f"  !! {ev.text}")
+
+    async with Kernel() as app:
+        loader = Loader(app.fiber, cfg_path, profiles=args.profiles)
+        app.provide("config.loader", loader)
+        res = await loader.apply(reason="va run")
+        if not res.ok:
+            print(str(res), file=sys.stderr)
+            return 1
+        mgr = app.get(SessionManager, None)
+        if mgr is None:
+            print("the configuration has no ventri_agent.sessions plugin", file=sys.stderr)
+            return 2
+        try:
+            s = await mgr.open(args.session, agent=args.agent, channel="run", headless=args.headless)
+        except SessionError as e:
+            print(f"va run: {e}", file=sys.stderr)
+            return 2
+        say(f"session {s.id} (agent {s.info.agent.name}{', headless' if args.headless else ''})")
+        try:
+            r = await s.turn(task, sink)
+        finally:
+            await s.end(extract=args.remember)
+    out = {"session": s.id, "status": r.status, "reason": r.reason, "text": r.text, "steps": r.steps,
+           "tool_calls": r.tool_calls, "prompt_tokens": r.usage.prompt_tokens, "cache_hit": r.usage.cache_hit,
+           "completion_tokens": r.usage.completion_tokens, "cost_usd": round(r.cost_usd, 6),
+           "seconds": round(time.monotonic() - t0, 1), "headless": bool(args.headless)}
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        print(r.text)
+        say(f"[{r.status}{': ' + r.reason if r.reason else ''}] {r.steps} steps, {r.tool_calls} tool calls, "
+            f"${r.cost_usd:.4f}, cache {r.usage.hit_rate:.0%}")
+    return 0 if r.status == "ok" else 1
 
 
 # ---------------------------------------------------------------- reports

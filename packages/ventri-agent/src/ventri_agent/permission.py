@@ -20,6 +20,13 @@
   records every request, decision and decider.
 * Fail closed: the agent loop refuses a tool call that no gate stamped
   (``ToolRequest.approved_by``).
+* Unattended (headless) sessions -- opened explicitly with ``headless=True``
+  (``va run --headless``), never by ``va chat`` -- have no human to ask: a
+  request that would be *asked* is decided by the ``unattended`` config
+  (``ask: deny|allow``, default deny), and ``irreversible`` / ``spend`` tools
+  by ``unattended.irreversible`` (default deny; ``allow`` must be written
+  explicitly). Rules and tool defaults still apply first (a ``deny`` stays a
+  deny), and every decision is audited with ``decided_by: unattended-policy``.
 """
 from __future__ import annotations
 
@@ -42,6 +49,7 @@ from ventri import Deny, Event
 
 from .messages import new_id, now_ts
 from .paths import expand
+from .session import SessionInfo
 from .tools.registry import Action, Risk, Tool
 
 Choice = Literal["once", "session", "deny"]
@@ -118,12 +126,27 @@ class Rule(BaseModel):
         return True
 
 
+class Unattended(BaseModel):
+    """How a headless session resolves what would otherwise be asked."""
+
+    ask: Literal["deny", "allow"] = "deny"            # write-local / external calls that need approval
+    irreversible: Literal["deny", "allow"] = "deny"   # irreversible / spend tools
+
+
 class Policy:
     """Service (root realm): ordered rules -> ``(action, reason)``."""
 
-    def __init__(self, rules: list[Rule] | None = None, *, approval_timeout: float = 120.0) -> None:
+    def __init__(self, rules: list[Rule] | None = None, *, approval_timeout: float = 120.0,
+                 unattended: Unattended | None = None) -> None:
         self.rules = tuple(rules or ())
         self.approval_timeout = approval_timeout
+        self.unattended = unattended or Unattended()
+
+    def decide_unattended(self, req: ToolRequest) -> tuple[Action, str]:
+        """The decision for an ``ask`` in a headless session (no human)."""
+        if req.tool.risk >= Risk.IRREVERSIBLE:
+            return self.unattended.irreversible, f"unattended.irreversible: {self.unattended.irreversible}"
+        return self.unattended.ask, f"unattended.ask: {self.unattended.ask}"
 
     def decide(self, req: ToolRequest) -> tuple[Action, str]:
         tool = req.tool
@@ -247,12 +270,13 @@ class PermissionGate:
     """The per-session interceptor (fiber ``permission-gate`` in the session scope)."""
 
     def __init__(self, ctx: Any, policy: Policy, broker: ApprovalBroker, grants: Grants,
-                 audit: AuditLog) -> None:
+                 audit: AuditLog, *, headless: bool = False) -> None:
         self.ctx = ctx
         self.policy = policy
         self.broker = broker
         self.grants = grants
         self.audit = audit
+        self.headless = headless
 
     async def __call__(self, req: ToolRequest) -> Deny | None:
         action, reason = self.policy.decide(req)
@@ -268,6 +292,15 @@ class PermissionGate:
         if self.grants.allows(req):
             req.approved_by = "grant:session"
             self.audit.write(**base, action="allow", decided_by="grant:session", reason=reason)
+            return None
+        if self.headless:
+            action, why = self.policy.decide_unattended(req)
+            self.audit.write(**base, action=action, decided_by="unattended-policy", reason=f"{reason}; {why}",
+                             headless=True)
+            self.ctx.trace("approval.unattended", tool=req.tool.name, risk=req.tool.risk.label, action=action)
+            if action != "allow":
+                return Deny(f"not approved: unattended run, {why} (no human to ask)")
+            req.approved_by = "unattended-policy"
             return None
         ar = ApprovalRequest(new_id("apr_"), req.session_id, req.tool.name, req.tool.risk.label,
                              dict(req.subject), req.summary,
@@ -305,24 +338,28 @@ class PermissionConfig(BaseModel):
     rules: list[Rule] = Field(default_factory=list)
     approval_timeout: float = 120.0
     audit: str | None = "~/.ventri/audit.jsonl"
+    unattended: Unattended = Field(default_factory=Unattended)   # headless sessions only
 
 
 @ventri.plugin(name="permission", config=PermissionConfig,
                provides={"policy": Policy, "approvals": ApprovalBroker, "audit": AuditLog})
 def permission(ctx: Any, cfg: PermissionConfig) -> None:
     """``use: ventri_agent.permission`` -- Policy + ApprovalBroker + AuditLog (root realm)."""
-    ctx.provide(Policy, Policy(cfg.rules, approval_timeout=cfg.approval_timeout))
+    ctx.provide(Policy, Policy(cfg.rules, approval_timeout=cfg.approval_timeout, unattended=cfg.unattended))
     ctx.provide(ApprovalBroker, ApprovalBroker(timeout=cfg.approval_timeout))
     ctx.provide(AuditLog, AuditLog(expand(cfg.audit) if cfg.audit else None))
 
 
 @ventri.plugin(name="permission-gate")
-def gate(ctx: Any, config: Any, policy: Policy, broker: ApprovalBroker, audit: AuditLog) -> None:
+def gate(ctx: Any, config: Any, policy: Policy, broker: ApprovalBroker, audit: AuditLog,
+         info: SessionInfo | None = None) -> None:
     """Session-scope plugin: provides ``Grants`` and intercepts ``ToolCheck``."""
     grants = ctx.provide(Grants, Grants())
     # Lowest priority: the gate decides on the *final* request, after any other
     # interceptor rewrote it, so an approval always covers exactly what runs.
-    ctx.intercept(ToolCheck, PermissionGate(ctx, policy, broker, grants, audit), priority=GATE_PRIORITY)
+    headless = bool(info is not None and info.headless)
+    ctx.intercept(ToolCheck, PermissionGate(ctx, policy, broker, grants, audit, headless=headless),
+                  priority=GATE_PRIORITY)
     ctx.on_dispose(grants.revoke)
 
 

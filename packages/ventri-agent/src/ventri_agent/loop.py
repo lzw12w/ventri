@@ -165,6 +165,9 @@ class AgentLoop:
             return await self._run(sink)
 
     def _time_note(self) -> None:
+        enabled = self.info.agent.time_notes
+        if enabled is False or (enabled is None and self.info.headless):
+            return
         t = time.time()
         if t - self._last_time_note < 600:
             return

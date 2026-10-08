@@ -81,9 +81,10 @@ def _core(info: SessionInfo, replay: Replay, limits: BudgetLimits) -> Any:
         jobs = ctx.provide(ShellJobs, ShellJobs(info.id))
         ctx.on_dispose(jobs.close)
         if not info.resumed:
-            log.append("meta", id=info.id, agent=info.agent.name, channel=info.channel, origin=info.origin)
+            log.append("meta", id=info.id, agent=info.agent.name, channel=info.channel, origin=info.origin,
+                       **({"headless": True} if info.headless else {}))
         else:
-            log.append("state", state="resumed")
+            log.append("state", state="resumed", **({"headless": True} if info.headless else {}))
     session_core.name = "session-core"  # type: ignore[attr-defined]
     return session_core
 
@@ -179,15 +180,29 @@ class SessionManager:
         for name, spec in raw.items():
             spec = dict(spec or {})
             tools = spec.get("tools", ["*"])
+            mode = str(spec.get("mode", "interactive"))
+            if mode not in ("interactive", "headless"):
+                raise SessionError(f"agent preset {name!r}: mode must be interactive or headless, not {mode!r}")
+            tn = spec.get("time_notes")
             out[name] = AgentPreset(name=name, persona=str(spec.get("persona", "")),
                                     tools=[tools] if isinstance(tools, str) else list(tools),
                                     route=str(spec.get("route", "default")), loop=spec.get("loop"),
-                                    memory_k=int(spec.get("memory_k", 12)))
+                                    memory_k=int(spec.get("memory_k", 12)),
+                                    system_prompt=str(spec.get("system_prompt", "") or ""),
+                                    time_notes=None if tn is None else bool(tn), mode=mode,
+                                    prune_tokens=int(spec.get("prune_tokens", 0)),
+                                    prune_keep=int(spec.get("prune_keep", 6)),
+                                    inline_tokens=int(spec.get("inline_tokens", 8_000)))
         return out
 
     # --------------------------------------------------------------- open
     async def open(self, session_id: str | None = None, *, agent: str | None = None,
-                   channel: str = "cli", origin: str = "user") -> Session:
+                   channel: str = "cli", origin: str = "user", headless: bool = False) -> Session:
+        """Open (or resume) a session. ``headless=True`` is the explicit opt-in to
+        an unattended run: approvals are decided by the permission config's
+        ``unattended`` policy instead of a channel, the system prompt defaults
+        to the headless one and time notes are off. It is never inherited from
+        the log -- every open has to ask for it again."""
         async with self._lock:
             sid = session_id or new_session_id()
             if sid in self.sessions and self.sessions[sid].alive:
@@ -199,7 +214,11 @@ class SessionManager:
             presets = self.presets()
             if name not in presets:
                 raise SessionError(f"unknown agent preset {name!r} (have: {', '.join(sorted(presets))})")
-            info = SessionInfo(sid, presets[name], sdir, log_path, channel, origin, resumed=resumed)
+            if presets[name].mode == "headless" and not headless:
+                raise SessionError(f"agent preset {name!r} is headless-only (mode: headless); "
+                                   "run it unattended with `va run --headless`")
+            info = SessionInfo(sid, presets[name], sdir, log_path, channel, origin, resumed=resumed,
+                               headless=headless)
             limits = BudgetLimits(**self.cfg.budget)
             scope = await self.ctx.scope(f"session:{sid}", isolate=SESSION_KEYS, meta={"id": f"session:{sid}"})
             try:
@@ -223,7 +242,7 @@ class SessionManager:
             s = Session(self, scope, info)
             self.sessions[sid] = s
             self.ctx.trace("session.open", session=sid, agent=name, resumed=resumed,
-                           history=len(replay.history))
+                           history=len(replay.history), headless=headless)
             return s
 
     def get(self, sid: str) -> Session | None:
