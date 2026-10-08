@@ -235,11 +235,17 @@ class Context:
             self.kernel._trace("event.error", lst.fiber, event=event, error=repr(e))
 
     # ----------------------------------------------------------- transactions
-    def transaction(self, *, wait: bool = True, strict: bool = False) -> Transaction:
-        """``async with ctx.transaction() as tx: ...`` -- see transaction.py."""
+    def transaction(self, *, wait: bool = True, strict: bool = False,
+                    origin: str | None = None, reason: str | None = None,
+                    timeout: float | None = None) -> Transaction:
+        """``async with ctx.transaction() as tx: ...`` -- see transaction.py.
+
+        A transaction opened inside a scope only locks that scope (plus shared
+        locks on its ancestors), so sessions do not block each other."""
         from .transaction import Transaction
 
-        return Transaction(self, wait=wait, strict=strict)
+        return Transaction(self, wait=wait, strict=strict, origin=origin, reason=reason,
+                           timeout=timeout)
 
     async def replace(self, fiber: Fiber, plugin_or_config: Any = _MISSING, *,
                       plugin: Any = _MISSING, config: Any = _MISSING) -> Fiber:

@@ -135,6 +135,7 @@ class Fiber:
         else:
             self.scope_chain = parent.scope_chain | {self} if scope else parent.scope_chain
         self._realm_cache: dict[Any, Realm] = {}
+        self._txlock: Any = None  # scope fibers: transaction lock (created lazily)
         self._bindings: list[Binding] = []  # live/staged bindings this fiber provides
         self._tx = tx
         self._effects: list[Effect] = []

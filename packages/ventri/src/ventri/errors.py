@@ -27,3 +27,7 @@ class TransactionBusy(TransactionError):
 
 class TransactionConflict(TransactionError):
     """Commit-time validation failed (base registry changed under the transaction)."""
+
+
+class TransactionTimeout(TransactionError):
+    """The transaction's ``timeout`` elapsed before commit; it was rolled back."""

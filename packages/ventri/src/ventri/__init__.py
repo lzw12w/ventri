@@ -10,6 +10,7 @@ from .errors import (
     TransactionBusy,
     TransactionConflict,
     TransactionError,
+    TransactionTimeout,
 )
 from .fiber import Fiber, State, TaskHandle
 from .kernel import Binding, Kernel, Realm, TraceEvent
@@ -35,5 +36,6 @@ __all__ = [
     "TransactionBusy",
     "TransactionConflict",
     "TransactionError",
+    "TransactionTimeout",
     "plugin",
 ]

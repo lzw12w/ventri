@@ -79,7 +79,7 @@ class Kernel(Context):
         self._listeners: dict[Any, list[Listener]] = {}
         self._tracers: list[Callable[[TraceEvent], Any]] = []
         self.trace_log: deque[TraceEvent] = deque(maxlen=trace_limit)
-        self._tx_lock = anyio.Lock()
+        self._tx_ids = itertools.count(1)
         self._tg: Any = None
         self._stack: AsyncExitStack | None = None
         root = Fiber(self, None, None, ctx=self, scope=True)
