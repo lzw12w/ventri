@@ -1,8 +1,8 @@
 """``va`` -- the Ventri Agent command line (DESIGN.md 7).
 
-M2 commands: ``init``, ``chat``, ``run``, ``sessions``, ``cost``, ``memory``,
-``tree``, ``doctor``. ``serve`` (M4), ``propose`` / ``history`` / ``rollback`` (M3) are
-reserved and exit with status 2.
+M2 commands: ``init``, ``chat``, ``run``, ``serve`` (daemon channels: Feishu),
+``sessions``, ``cost``, ``memory``, ``tree``, ``doctor``. ``propose`` / ``history`` /
+``rollback`` (M3) are reserved and exit with status 2.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from ventri import Kernel
 from . import __version__
 from .paths import home
 
-LATER = {"serve": "M4 (local Web UI + Feishu daemon)", "propose": "M3 (evolution manager)",
+LATER = {"propose": "M3 (evolution manager)",
          "history": "M3 (evolution ledger)", "rollback": "M3 (evolution ledger)",
          "reload": "M3 (dev-mode code reload)"}
 
@@ -61,6 +61,17 @@ plugins:
       - use: ventri_agent.tools.inspect
   - use: ventri_agent.sessions
     config: {{ idle_timeout: 1800, retention_days: 7 }}
+  # Feishu / Lark bot (docs/feishu-setup.md): pip install 'ventri-agent[feishu]', then `va serve`.
+  # Disabled by default; it only connects under `va serve`. Empty allow_users = nobody may use it.
+  # - use: ventri_agent.channels.feishu
+  #   id: feishu
+  #   config:
+  #     app_id: cli_xxxxxxxxxxxxxxxx
+  #     app_secret: "${{secret:feishu_app_secret}}"   # keychain service 'ventri' or $VENTRI_SECRET_FEISHU_APP_SECRET
+  #     domain: feishu                 # lark for larksuite.com
+  #     allow_users: []                # your open_id (ou_...); message the bot once and it tells you
+  #     allow_chats: []                # group chat_ids (oc_...) the bot may answer in
+  #     require_mention: true          # groups: only messages that @ the bot
 agents:
   default: {{ persona: personas/default.md, tools: ["*"], route: default }}
 """
@@ -139,6 +150,14 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--out", "-o", type=Path)
     t = sub.add_parser("tree", help="plugin tree the configuration produces (dry run)")
     t.add_argument("--config", type=Path, default=None)
+    sv = sub.add_parser("serve", help="run the daemon channels (Feishu) until Ctrl-C",
+                        description="Load the configuration and keep the daemon channels (the Feishu bot, "
+                        "ventri_agent.channels.feishu) connected until Ctrl-C / SIGTERM. Config edits are "
+                        "hot-applied. Approvals are answered on the channel (card buttons).")
+    sv.add_argument("--config", type=Path, default=None)
+    sv.add_argument("--profile", action="append", dest="profiles", default=None)
+    sv.add_argument("--no-watch", action="store_true", help="do not hot-apply config edits")
+    sv.add_argument("--verbose", "-v", action="store_true", help="log channel activity to stderr")
     d = sub.add_parser("doctor", help="check the environment and configuration")
     d.add_argument("--config", type=Path, default=None)
     for name, when in LATER.items():
@@ -151,7 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd in LATER:
         print(f"va {args.cmd}: not available in 0.2 (planned for {LATER[args.cmd]})", file=sys.stderr)
         return 2
-    fn = {"init": cmd_init, "chat": cmd_chat, "run": cmd_run, "sessions": cmd_sessions, "cost": cmd_cost,
+    fn = {"init": cmd_init, "chat": cmd_chat, "run": cmd_run, "serve": cmd_serve, "sessions": cmd_sessions,
+          "cost": cmd_cost,
           "memory": cmd_memory, "tree": cmd_tree, "doctor": cmd_doctor}[args.cmd]
     from ventri_std.config import ConfigError
 
@@ -332,6 +352,65 @@ async def run_task(args: argparse.Namespace, task: str) -> int:
         say(f"[{r.status}{': ' + r.reason if r.reason else ''}] {r.steps} steps, {r.tool_calls} tool calls, "
             f"${r.cost_usd:.4f}, cache {r.usage.hit_rate:.0%}")
     return 0 if r.status == "ok" else 1
+
+
+# -------------------------------------------------------------------- serve
+def cmd_serve(args: argparse.Namespace) -> int:
+    import logging
+
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, stream=sys.stderr,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    return anyio.run(serve, args, backend="asyncio")
+
+
+async def serve(args: argparse.Namespace, *, services: dict[str, Any] | None = None,
+                stop: anyio.Event | None = None) -> int:
+    """Run the daemon channels until SIGINT / SIGTERM (or ``stop``, in tests)."""
+    import signal
+
+    from ventri_std.config import Loader, load_document
+
+    from .serve import SERVE_KEY, ServeHub
+
+    cfg_path = _config_path(args.config)
+    if not cfg_path.exists():
+        print(f"no configuration at {cfg_path}; run `va init` first", file=sys.stderr)
+        return 2
+    load_document(cfg_path, profiles=args.profiles)
+    hub = ServeHub()
+    async with Kernel() as app:
+        loader = Loader(app.fiber, cfg_path, profiles=args.profiles)
+        app.provide("config.loader", loader)
+        app.provide(SERVE_KEY, hub)
+        for k, v in (services or {}).items():
+            app.provide(k, v)
+        res = await loader.apply(reason="va serve")
+        if not res.ok:
+            print(str(res), file=sys.stderr)
+            return 1
+        if not hub.channels:
+            print("va serve: no daemon channel in the configuration; add `use: ventri_agent.channels.feishu` "
+                  "(see docs/feishu-setup.md)", file=sys.stderr)
+            return 2
+        names = ", ".join(f"feishu {c.cfg.app_id}" for c in hub.channels)
+        print(f"va serve: {names} -- Ctrl-C to stop", file=sys.stderr, flush=True)
+
+        def report(r: Any) -> None:
+            print(f"va serve: config {'applied' if getattr(r, 'ok', False) else 'NOT applied'}: "
+                  f"{str(r).splitlines()[0] if str(r) else ''}", file=sys.stderr, flush=True)
+
+        async with anyio.create_task_group() as tg:
+            if not args.no_watch:
+                tg.start_soon(lambda: loader.watch(on_result=report))
+            if stop is not None:
+                await stop.wait()
+            else:
+                with anyio.open_signal_receiver(signal.SIGINT, signal.SIGTERM) as sigs:
+                    async for _ in sigs:
+                        break
+            tg.cancel_scope.cancel()
+        print("va serve: stopping", file=sys.stderr, flush=True)
+    return 0
 
 
 # ---------------------------------------------------------------- reports

@@ -18,7 +18,8 @@ classifiers = [
 [project.optional-dependencies]
 # Reserved extras (DESIGN.md section 7). MCP (`mcp`) arrives with the bridge in M3.
 web = []
-feishu = []
+# Feishu / Lark channel (`va serve`): the official SDK, imported lazily by ventri_agent.channels.feishu.
+feishu = ["lark-oapi>=1.7,<2"]
 vec = []
 
 [project.scripts]

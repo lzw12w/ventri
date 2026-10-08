@@ -106,7 +106,7 @@ async def test_channel_eof_ends_session_and_extracts(tmp_path):
 
 # --------------------------------------------------------------------- va
 def test_va_reserved_commands_exit_2(capsys):
-    for cmd in ("serve", "propose", "history", "rollback"):
+    for cmd in ("propose", "history", "rollback"):
         assert va.main([cmd]) == 2
     assert "not available in 0.2" in capsys.readouterr().err
 

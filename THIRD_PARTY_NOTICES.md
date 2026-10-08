@@ -15,7 +15,10 @@ Ventri includes code adapted from the following third-party projects.
   `packages/ventri-agent/src/ventri_agent/threat_patterns.py` (memory-write injection scan, from
   `tools/threat_patterns.py`); the ANSI stripping and head/tail split in
   `packages/ventri-agent/src/ventri_agent/tools/output.py` (from `tools/ansi_strip.py` and
-  `tools/tool_output_truncate.py`).
+  `tools/tool_output_truncate.py`); `packages/ventri-agent/src/ventri_agent/channels/feishu/_hermes.py`
+  (Feishu inbound text/post parsing and @-mention handling, fence-aware Markdown segmentation, reply
+  fallback codes, and the thread-local loop proxy / receive-loop guard for the `lark-oapi` websocket
+  client, from `plugins/platforms/feishu/adapter.py`).
   Each adapted file carries an attribution header naming its Hermes source files.
 - License: MIT
 
