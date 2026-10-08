@@ -159,8 +159,6 @@ class Fiber:
         self._lock_owner: int | None = None
         self._load_scope: anyio.CancelScope | None = None
         self._dispose_requested = False
-        self._tg: Any = None
-        self._closed: anyio.Event | None = None
         if parent is not None:
             parent.children.append(self)
 
@@ -271,39 +269,9 @@ class Fiber:
         except Exception as e:  # noqa: BLE001 - cleanup errors are reported, never propagated
             self.kernel._trace("effect.error", self, effect=eff.label, error=repr(e))
 
-    # ------------------------------------------------------- task group host
-    async def _open_scope(self) -> None:
-        closed = anyio.Event()
-
-        async def host(*, task_status: Any = anyio.TASK_STATUS_IGNORED) -> None:
-            tg_ref = None
-            try:
-                async with anyio.create_task_group() as tg:
-                    tg_ref = self._tg = tg
-                    task_status.started()
-                    await anyio.sleep_forever()  # until _close_scope cancels the group
-            finally:
-                if self._tg is tg_ref:
-                    self._tg = None
-                closed.set()
-
-        self._closed = closed
-        assert self.parent is not None and self.parent._tg is not None
-        await self.parent._tg.start(host, name=f"fiber:{self.label}")
-
-    async def _close_scope(self) -> None:
-        closed = self._closed
-        if closed is None:
-            return
-        self._closed = None
-        if self._tg is not None:
-            self._tg.cancel_scope.cancel()
-        # A task inside this fiber's own task group cannot wait for that group to exit.
-        if self._tg is not None and not self.kernel._inside(self):
-            await closed.wait()
-
     def spawn(self, fn: Callable[..., Any], *args: Any, name: str | None = None) -> TaskHandle:
-        if self.state not in LIVE or self._tg is None:
+        tg = self.kernel._tg
+        if self.state not in LIVE or tg is None:
             raise RuntimeError(f"cannot spawn on {self!r}")
         label = name or getattr(fn, "__name__", "task")
         scope, done = anyio.CancelScope(), anyio.Event()
@@ -332,7 +300,9 @@ class Fiber:
                 if eff in self._effects:
                     self._effects.remove(eff)
 
-        self._tg.start_soon(runner, name=f"{self.label}:{label}")
+        # Tasks run in the kernel's task group; the fiber owns them through the
+        # stop effect above (cancel + join at teardown, LIFO with its other effects).
+        tg.start_soon(runner, name=f"{self.label}:{label}")
         k._trace("task.spawn", self, task=label)
         return TaskHandle(label, scope, done)
 
@@ -363,7 +333,7 @@ class Fiber:
             parent = self.parent
             if self.state is not State.PENDING or self._dispose_requested or self._parked:
                 return False
-            if parent is None or parent.state not in LIVE or parent._tg is None:
+            if parent is None or parent.state not in LIVE:
                 return False
             snapshot = k._resolve(self)
             if snapshot is None:
@@ -377,7 +347,6 @@ class Fiber:
             try:
                 with scope:
                     self._load_scope = scope
-                    await self._open_scope()
                     await self._apply()
                     ok = True
             except Exception as e:  # noqa: BLE001 - any apply error -> FAILED (fiber.error)
@@ -432,7 +401,6 @@ class Fiber:
                 await child._dispose()
             while self._effects:
                 await self._run_effect(self._effects.pop())
-            await self._close_scope()
             self._snapshot, self.instance = {}, None
 
     async def _deactivate(self) -> bool:

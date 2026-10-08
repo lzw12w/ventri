@@ -165,7 +165,7 @@ async def test_dispose_while_loading():
             await f.dispose()
             assert f.state is State.DISPOSED
         assert result["f"] is f
-        assert log == ["cleanup"] and f._effects == [] and f._tg is None
+        assert log == ["cleanup"] and f._effects == []  # no task or effect left behind
         assert app.fiber.children == []
 
 

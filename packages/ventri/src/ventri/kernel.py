@@ -120,7 +120,6 @@ class Kernel(Context):
     async def __aenter__(self) -> Self:
         self._stack = AsyncExitStack()
         self._tg = await self._stack.enter_async_context(anyio.create_task_group())
-        self.fiber._tg = self._tg
         self._trace("kernel.start")
         return self
 
