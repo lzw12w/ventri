@@ -1,0 +1,33 @@
+{
+  "theme": "default",
+  "themeVariables": {
+    "fontFamily": "Noto Sans CJK SC, Noto Sans SC, sans-serif",
+    "fontSize": "15px"
+  },
+  "flowchart": {
+    "htmlLabels": true,
+    "curve": "basis",
+    "padding": 12,
+    "wrappingWidth": 420
+  },
+  "sequence": {
+    "actorFontFamily": "Noto Sans CJK SC",
+    "messageFontFamily": "Noto Sans CJK SC",
+    "noteFontFamily": "Noto Sans CJK SC",
+    "mirrorActors": false,
+    "wrap": true,
+    "width": 130,
+    "messageFontSize": 15,
+    "actorFontSize": 15,
+    "noteFontSize": 14,
+    "actorMargin": 40,
+    "boxMargin": 8
+  },
+  "gantt": {
+    "fontSize": 13,
+    "barHeight": 22,
+    "sectionFontSize": 14,
+    "leftPadding": 230
+  },
+  "markdownAutoWrap": false
+}

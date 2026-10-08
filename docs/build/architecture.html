@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:1800px;height:1250px;background:#f7f8fb;font-family:"Noto Sans CJK SC","Noto Sans SC",sans-serif;color:#1d2433;position:relative;overflow:hidden}
+.abs{position:absolute}
+h1{position:absolute;left:30px;top:22px;font-size:34px;font-weight:700;letter-spacing:1px}
+h1 small{font-size:18px;font-weight:400;color:#5b6475;margin-left:16px}
+.frame{border:2.5px dashed #8a93a6;border-radius:18px;background:#fff}
+.frame-label{position:absolute;top:-14px;left:24px;background:#f7f8fb;padding:0 10px;font-size:15px;color:#5b6475;font-weight:600}
+.band{position:absolute;left:300px;width:830px;border-radius:12px;display:flex;overflow:hidden}
+.band .tag{width:150px;flex:none;color:#fff;padding:14px 12px;display:flex;flex-direction:column;justify-content:center}
+.band .tag b{font-size:20px;line-height:1.25}
+.band .tag span{font-size:13px;opacity:.9;margin-top:6px;font-family:"Noto Sans Mono",monospace}
+.band .body{flex:1;padding:12px;display:flex;flex-wrap:wrap;gap:9px;align-content:center}
+.chip{border-radius:8px;padding:7px 11px;font-size:15px;line-height:1.3;background:#fff;border:1.5px solid}
+.chip i{display:block;font-style:normal;font-size:12px;color:#5b6475}
+.chip.dash{border-style:dashed;color:#6b7280}
+.L4 .tag{background:#c8553d}.L4{background:#fbe9e5}.L4 .chip{border-color:#c8553d}
+.L3 .tag{background:#d18f2a}.L3{background:#fdf2df}.L3 .chip{border-color:#d18f2a}
+.L2 .tag{background:#3f8f6b}.L2{background:#e3f3ea}.L2 .chip{border-color:#3f8f6b}
+.L1 .tag{background:#2e6f95}.L1{background:#e1eef6}.L1 .chip{border-color:#2e6f95}
+.L0 .tag{background:#1f3a5f}.L0{background:#dfe5ef}.L0 .chip{border-color:#1f3a5f}
+.chip.key{background:#1f3a5f;color:#fff}.chip.key i{color:#cfd8e6}
+.vbar{position:absolute;top:160px;height:1030px;width:82px;border-radius:12px;writing-mode:vertical-rl;display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:600;letter-spacing:3px;color:#fff}
+.vbar small{font-size:13px;font-weight:400;letter-spacing:1px;margin-top:10px;opacity:.92}
+.box{position:absolute;border-radius:12px;background:#fff;border:2px solid #9aa3b5;padding:12px 14px}
+.box h3{font-size:17px;margin-bottom:6px}
+.box p{font-size:13.5px;color:#3d4556;line-height:1.5}
+.ext{border-color:#6b7280;background:#fafafa}
+.sat{border:2.5px dashed #7a4fbf;background:#f3edff}
+.sat h3{color:#5a35a0}
+.scope{display:inline-block;border:1.5px dashed #6b4fbb;background:#efe6ff;color:#2d1b69;border-radius:6px;font-size:12px;padding:2px 6px;margin:3px 3px 0 0}
+.legend{position:absolute;left:1390px;top:985px;width:390px;font-size:13.5px;color:#3d4556;line-height:1.75}
+.legend b{color:#1d2433}
+.sw{display:inline-block;width:14px;height:14px;border-radius:3px;vertical-align:-2px;margin-right:6px}
+svg{position:absolute;left:0;top:0}
+.al{font-size:13px;fill:#3d4556;font-family:"Noto Sans CJK SC",sans-serif}
+</style></head><body>
+<h1>Ventri 总体架构<small>Ventri Core 内核 + Ventri Agent（DeepSeek 优先的个人 Agent）· 2026-10-08</small></h1>
+
+<!-- left column -->
+<div class="box" style="left:30px;top:160px;width:230px;height:200px">
+  <h3>👤 用户</h3>
+  <p>终端 · 浏览器 · 飞书 · Telegram</p>
+  <p style="margin-top:8px">对话、审批卡片、<br>批准 / 回滚演化提案</p>
+  <p style="margin-top:8px;color:#c8553d"><b>批准只来自人类渠道</b></p>
+</div>
+<div class="box" style="left:30px;top:745px;width:230px;height:250px">
+  <h3>📄 声明式配置</h3>
+  <p><b>~/.ventri/ventri.yml</b><br>profiles/ · personas/ · skills/</p>
+  <p style="margin-top:8px">保存 = 一次事务<br>diff → 提交 / 回滚</p>
+  <p style="margin-top:8px"><b>~/.ventri 是 git 仓库</b><br>= 演化账本，一键回滚</p>
+</div>
+<div class="box" style="left:30px;top:1020px;width:230px;height:170px">
+  <h3>💾 本地数据</h3>
+  <p>sessions/*.jsonl<br>memory.db (SQLite+FTS5)<br>audit.jsonl · trace/</p>
+</div>
+
+<!-- host frame -->
+<div class="abs frame" style="left:282px;top:118px;width:1050px;height:1100px"><div class="frame-label">宿主进程 · 单机单用户 · Python 3.12+ · anyio 结构化并发（插件树 = 任务树 = 作用域树）</div></div>
+
+<div class="band L4" style="top:160px;height:140px">
+  <div class="tag"><b>L4 渠道</b><span>ventri-agent</span></div>
+  <div class="body">
+    <div class="chip">CLI<i>M2 · 流式 · 内联审批</i></div>
+    <div class="chip">本地 Web UI<i>M4 · 审批卡片 · 树/trace 查看</i></div>
+    <div class="chip">飞书机器人<i>M4 · 长连接事件</i></div>
+    <div class="chip">Telegram<i>M4</i></div>
+    <div class="chip dash">企业微信<i>1.0 后</i></div>
+  </div>
+</div>
+
+<div class="band L3" style="top:315px;height:195px">
+  <div class="tag"><b>L3 个人 Agent 插件</b><span>ventri-agent / 第三方</span></div>
+  <div class="body">
+    <div class="chip">长期记忆<i>SQLite + FTS5 · 可选向量</i></div>
+    <div class="chip">工具<i>fs · shell · web · notes · calendar</i></div>
+    <div class="chip">MCP 桥<i>每个服务器 = 一个 fiber</i></div>
+    <div class="chip">Skills<i>SKILL.md · 按需加载</i></div>
+    <div class="chip">例行任务<i>谷时调度</i></div>
+    <div class="chip">inspect 自省<i>只读 · 脱敏</i></div>
+    <div class="chip dash">用户插件 T1<i>进程内 · 能力护栏</i></div>
+  </div>
+</div>
+
+<div class="band L2" style="top:525px;height:215px">
+  <div class="tag"><b>L2 Agent 运行时</b><span>ventri-agent</span></div>
+  <div class="body">
+    <div class="chip">ModelProvider<i>DeepSeek 适配器 · OpenAI 兼容</i></div>
+    <div class="chip">AgentLoop<i>预算 · 并行只读工具</i></div>
+    <div class="chip">ContextBuilder<i>稳定前缀 · 只追加 · epoch</i></div>
+    <div class="chip">ToolRegistry<i>strict schema</i></div>
+    <div class="chip">权限与审批<i>allow / ask / deny · 审计</i></div>
+    <div class="chip">演化管理器<i>提案 → 试运行 → 审批</i></div>
+    <div class="chip" style="min-width:420px">SessionManager · 会话 = scope<br>
+      <span class="scope">session:a1 · SessionLog · Grants · Budget · agent-loop</span><span class="scope">session:b7 …</span></div>
+  </div>
+</div>
+
+<div class="band L1" style="top:755px;height:195px">
+  <div class="tag"><b>L1 标准插件</b><span>ventri-std</span></div>
+  <div class="body">
+    <div class="chip">配置加载器<i>YAML → 合并 → diff → 单事务</i></div>
+    <div class="chip">profiles · secrets<i>keyring · 自动打码</i></div>
+    <div class="chip">沙箱宿主<i>卫星进程 · 能力代理</i></div>
+    <div class="chip">调度器<i>cron · 峰谷感知</i></div>
+    <div class="chip">trace 导出<i>JSONL · OpenTelemetry</i></div>
+    <div class="chip">存储 · HTTP<i>httpx 客户端</i></div>
+    <div class="chip">ventri CLI<i>run · apply · tree · doctor · stubgen</i></div>
+  </div>
+</div>
+
+<div class="band L0" style="top:965px;height:225px">
+  <div class="tag"><b>L0 Ventri Core</b><span>ventri · 仅依赖 anyio</span></div>
+  <div class="body">
+    <div class="chip key">Kernel / Context<i>ctx.get(Type) · 签名注入 · stub</i></div>
+    <div class="chip key">Fiber 状态机<i>PENDING · LOADING · ACTIVE · FAILED · UNLOADING · DISPOSED</i></div>
+    <div class="chip key">服务注册表 + realm<i>作用域隔离 · 依赖自动挂起/恢复</i></div>
+    <div class="chip key">事务<i>蓝绿暂存 · 原子提交 · 精确回滚 · dry-run</i></div>
+    <div class="chip key">事件<i>优先级 · 作用域过滤 · 拦截器</i></div>
+    <div class="chip key">Trace<i>schema v1 · tree() · snapshot()</i></div>
+  </div>
+</div>
+
+<div class="vbar" style="left:1145px;background:#4b5875">可观测性 · Trace<small>tree · snapshot · JSONL · OTel · Agent 自省</small></div>
+<div class="vbar" style="left:1238px;background:#7a4fbf">安全与能力<small>T0 / T1 / T2 · 能力清单 · 权限引擎</small></div>
+
+<!-- right column -->
+<div class="box ext" style="left:1420px;top:160px;width:350px;height:105px">
+  <h3>🌐 外部世界</h3><p>IM 平台（飞书 / Telegram）<br>Web 搜索与抓取 · 日历 (CalDAV)</p>
+</div>
+<div class="box ext" style="left:1420px;top:300px;width:350px;height:95px">
+  <h3>🔌 MCP 服务器</h3><p>stdio 子进程 · Streamable HTTP</p>
+</div>
+<div class="box ext" style="left:1420px;top:430px;width:350px;height:165px">
+  <h3>☁️ DeepSeek API</h3>
+  <p><b>deepseek-flash</b> (V4.1-Flash)<br><b>deepseek-v4-pro</b> (V4-Pro)<br>
+  思考 low/high/max · 工具 (strict) · JSON<br>硬盘上下文缓存 · 1M 上下文 · 峰谷定价</p>
+</div>
+<div class="box ext" style="left:1420px;top:610px;width:350px;height:62px">
+  <h3 style="margin:0">☁️ OpenAI 兼容端点 / 本地模型</h3>
+</div>
+<div class="box sat" style="left:1420px;top:700px;width:350px;height:255px">
+  <h3>🧪 卫星子进程（OS 沙箱）</h3>
+  <p><b>T2 插件：模型生成的代码</b><br>同语义 ventri 微内核<br>
+  只能经能力代理访问宿主服务<br>默认无网络 · 无 home · 资源限额</p>
+  <p style="margin-top:6px">Linux: bubblewrap + seccomp + landlock<br>macOS: sandbox-exec<br>其他平台：不运行 T2</p>
+</div>
+<div class="legend">
+  <b>依赖方向</b>：只能向下（L4 → L0）。L0 不知道 “Agent”。<br>
+  <b>任何变更</b>（配置保存、替换插件、演化提案）= 一个事务：<br>要么全部生效，要么快照逐字段回到原样。<br>
+  <b>会话</b> = scope：结束即回收其服务、授权与任务。<br>
+  <span class="sw" style="background:#1f3a5f"></span>已有原型 (M0) 的核心机制
+  <span class="sw" style="background:#efe6ff;border:1.5px dashed #6b4fbb;margin-left:10px"></span>会话作用域
+</div>
+
+<svg width="1800" height="1250">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3d4556"/></marker></defs>
+  <g stroke="#3d4556" stroke-width="2.2" fill="none">
+    <path d="M260,230 L298,230" marker-end="url(#a)" marker-start="url(#a)"/>
+    <path d="M260,850 L298,850" marker-end="url(#a)"/>
+    <path d="M260,1100 C275,1100 280,1060 298,1060" marker-end="url(#a)" marker-start="url(#a)"/>
+    <path d="M1334,212 L1418,212" marker-end="url(#a)" marker-start="url(#a)" stroke-dasharray="6 5"/>
+    <path d="M1334,345 C1370,345 1380,245 1418,245" marker-end="url(#a)"/>
+    <path d="M1334,420 C1375,420 1380,355 1418,355" marker-end="url(#a)" marker-start="url(#a)"/>
+    <path d="M1334,560 L1418,560" marker-end="url(#a)"/>
+    <path d="M1334,640 L1418,640" marker-end="url(#a)"/>
+    <path d="M1334,830 L1418,830" marker-end="url(#a)" marker-start="url(#a)" stroke="#7a4fbf" stroke-width="2.8"/>
+  </g>
+  <g class="al">
+    <text x="1341" y="204">L4 渠道</text>
+    <text x="1341" y="338">L3 工具</text>
+    <text x="1341" y="436">L3 MCP</text>
+    <text x="1341" y="552">L2 HTTPS</text>
+    <text x="1341" y="632">L2</text>
+    <text x="1338" y="822" fill="#5a35a0">JSON-RPC</text>
+    <text x="1338" y="852" fill="#5a35a0">能力代理</text>
+  </g>
+</svg>
+</body></html>
