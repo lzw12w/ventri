@@ -113,15 +113,16 @@ async def test_fs_tools_are_confined_to_roots(tmp_path):
     with pytest.raises(ToolError):
         await run(tools["fs.write"], {"path": "../x.md", "content": "x"}, tmp_path)
     assert "a.md" in await run(tools["fs.list"], {"path": "."}, tmp_path)
-    assert "a.md:2: second line" in await run(tools["fs.search"], {"query": "SECOND"}, tmp_path)
+    assert "a.md:2: second line" in await run(tools["fs.search"], {"pattern": "SECOND", "ignore_case": True},
+                                              tmp_path)
     await run(tools["fs.write"], {"path": "sub/n.md", "content": "one"}, tmp_path)
     with pytest.raises(ToolError, match="exists"):
         await run(tools["fs.write"], {"path": "sub/n.md", "content": "two"}, tmp_path)
     await run(tools["fs.write"], {"path": "sub/n.md", "content": " two", "mode": "append"}, tmp_path)
-    await run(tools["fs.edit"], {"path": "sub/n.md", "old": "one", "new": "1"}, tmp_path)
-    assert (root / "sub/n.md").read_text() == "1 two"
-    with pytest.raises(ToolError, match="occurrence"):
-        await run(tools["fs.edit"], {"path": "sub/n.md", "old": "zzz", "new": "1"}, tmp_path)
+    await run(tools["fs.edit"], {"path": "sub/n.md", "old_string": "one", "new_string": "1"}, tmp_path)
+    assert (root / "sub/n.md").read_text() == "1\n two"   # append adds the missing newline first
+    with pytest.raises(ToolError, match="Could not find"):
+        await run(tools["fs.edit"], {"path": "sub/n.md", "old_string": "zzz", "new_string": "1"}, tmp_path)
     w = tools["fs.write"]
     assert w.risk == Risk.WRITE_LOCAL and w.default_action == "ask" and tools["fs.read"].untrusted
     assert w.describe_call(w.parse({"path": "x.md", "content": ""})) == {"path": str(root / "x.md")}
