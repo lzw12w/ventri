@@ -146,16 +146,19 @@ Alpha: public but may still change within 0.2.x. Design: DESIGN.md section 5 and
 | `ventri_agent.providers.openai_compat` | `ModelProvider` | `base_url`, `api_key`, `routes`, `context`, `max_output`, `concurrency`, `timeout`, `max_retries` |
 | `ventri_agent.providers.fake` | `ModelProvider` | `script` (steps), `script_file` (JSON/YAML), `chunk_delay` |
 | `ventri_agent.tools.registry` | `ToolRegistry` | -- |
-| `ventri_agent.permission` | `Policy`, `ApprovalBroker`, `AuditLog` | `rules: [{tool, action, risk?, when?, origin?, agent?, session?}]`, `approval_timeout=120`, `audit` |
+| `ventri_agent.permission` | `Policy`, `ApprovalBroker`, `AuditLog` | `rules: [{tool, action, risk?, when?, origin?, agent?, session?}]`, `approval_timeout=120`, `audit`, `unattended: {ask: deny\|allow, irreversible: deny\|allow}` (both default `deny`; only consulted for headless sessions) |
 | `ventri_agent.memory` | `LongTermMemory` | `path` (`~/.ventri/memory.db`, or `:memory:`) |
 | `ventri_agent.sessions` | `SessionManager` | `dir`, `idle_timeout=1800`, `retention_days=7`, `budget`, `agents`, `extract_memory=true`, `sweep_interval` |
-| `ventri_agent.tools.core` / `.fs` / `.shell` / `.web` / `.notes` / `.memory` / `.inspect` | tools | fs: `roots`, `write` (file behaviour adapted from Hermes Agent, see THIRD_PARTY_NOTICES.md); shell: `cwd`, `policy`, `timeout`, `max_capture_bytes=4000000`, `tail_bytes=256000`, `preview_tokens=6000` (`max_output` ignored); web: `allow_domains`, `timeout`, `max_bytes`, `max_redirects=5`, `allow_private_urls=false` (SSRF guard adapted from Hermes Agent); notes: `vault`, `write`; memory tools: `memory.search`, `memory.remember`, `memory.update`, `memory.forget` |
+| `ventri_agent.tools.core` / `.fs` / `.shell` / `.web` / `.notes` / `.memory` / `.inspect` | tools | fs: `roots`, `write` (file behaviour adapted from Hermes Agent, see THIRD_PARTY_NOTICES.md); shell (tools `shell.run` with `background`, `shell.output(job, wait, pattern, since)`, `shell.jobs`, `shell.kill(job, signal)`): `cwd`, `policy`, `timeout`, `max_capture_bytes=4000000`, `tail_bytes=256000`, `preview_tokens=6000`, `persist=false`, `max_jobs=16`, `job_log_bytes=8000000`, `job_keep_bytes=2000000`, `jobs_on_dispose=kill\|keep`, `hide_runtime=true`, `hide_paths=[]`, `base_env_file` (`max_output` ignored); web: `allow_domains`, `timeout`, `max_bytes`, `max_redirects=5`, `allow_private_urls=false` (SSRF guard adapted from Hermes Agent); notes: `vault`, `write`; memory tools: `memory.search`, `memory.remember`, `memory.update`, `memory.forget` |
 | `ventri_agent.channels.cli` | `CliChannel` | `session`, `agent`, `resume_last`, `show_thinking` (exclusive; reads an optional `"cli.terminal"` service) |
 
 Session-scope plugins loaded by `SessionManager.open` (not used directly in `ventri.yml`):
 `permission.gate` (provides `Grants`, intercepts `ToolCheck`), `context.context_builder` (`ContextBuilder`),
 `loop.agent_loop` (`AgentLoop`; replaceable per agent preset with `agents: {name: {loop: "<use>"}}`).
-Top-level `agents: {name: {persona, tools: [globs], route, loop, memory_k}}` in `ventri.yml` defines presets.
+Top-level `agents: {name: {persona, tools: [globs], route, loop, memory_k, system_prompt, time_notes, mode,
+prune_tokens, prune_keep, inline_tokens}}` in `ventri.yml` defines presets. `system_prompt` (file or inline) replaces
+persona + rules; `time_notes` (default on, off when headless); `mode: headless` presets open only with `headless=True`;
+`prune_tokens` (0 = off) / `prune_keep` (6) control context pruning; `inline_tokens` (8000) is the artifact spill threshold.
 
 ### Types
 
@@ -175,9 +178,12 @@ Top-level `agents: {name: {persona, tools: [globs], route, loop, memory_k}}` in 
 - `loop`: `AgentLoop` (`turn(text, sink, plan=False) -> TurnResult`, `retry`, `compact`, `extract_memories`), `TurnEvent`
   (`turn.start | reasoning | content | tool.call | tool.start | tool.end | notice | error | turn.end`), `TurnResult`,
   events `MessageIn` / `AgentOutput`.
-- `sessions`: `SessionManager` (`open(id=None, agent=, channel=, origin=)`, `get`, `suspend`, `end`, `list`, `last_id`,
+- `sessions`: `SessionManager` (`open(id=None, agent=, channel=, origin=, headless=False)`, `get`, `suspend`, `end`, `list`, `last_id`,
   `sweep_idle`, `sweep_retention`), `Session` (`turn`, `retry`, `suspend`, `end`, `alive`, `loop`, `ctx`), `SessionError`.
-- `session`: `SessionLog` (JSONL; `replay(path) -> Replay`), `SessionInfo`, `AgentPreset`, `Budget` / `BudgetLimits`.
+- `session`: `SessionLog` (JSONL; `replay(path) -> Replay`), `SessionInfo` (`… headless`), `AgentPreset`, `Budget` / `BudgetLimits`.
+- `context`: `ContextBuilder` (`build`, `maybe_prune`, `system_text`, compaction), `RULES`, `HEADLESS_SYSTEM`, `apply_prune(history, edits)`.
+- `permission` (headless): `Unattended(ask, irreversible)`, `Policy.decide_unattended(req)`; audit `decided_by: unattended-policy`.
+- `tools.shell`: `ShellJobs` (session service: jobs + persisted cwd/env; `close()` on dispose), `clean_env(base=None, hide_runtime=True, hide_paths=())`, `read_env_file`, `make_tools(cfg)`.
 - `memory`: `LongTermMemory` (`remember -> Remembered(item, action=created|duplicate|superseded, previous)`, `add -> (item, created)`,
   `update(id, text) -> MemoryItem | None` (restores a superseded item), `confirm` (applies a pending supersede), `forget`, `get`,
   `list(status=active|pending|superseded|None)`, `search`, `top`, `export_markdown`, `import_markdown`), `WorkingMemory`,
@@ -188,13 +194,15 @@ Top-level `agents: {name: {persona, tools: [globs], route, loop, memory_k}}` in 
 
 ### Session log records (`~/.ventri/sessions/<id>.jsonl`)
 
-`meta`, `prefix` (epoch: system, memory, tool names, tools, strict, hash), `msg`, `compact` (drop, summary), `usage`
+`meta` (`headless` when set), `prefix` (epoch: system, memory, tool names, tools, strict, hash), `msg`, `compact` (drop, summary),
+`prune` (edits by message `seq`: content / args / reasoning, saved), `usage`
 (model, route, usage, cost_usd, peak, finish), `turn`, `work`, `state` (`resumed | suspended | ended | memory`).
 Every record has `t` and `ts`. Append-only; a torn last line is skipped on replay.
 
 ### CLI
 
 `va init [--force] [--no-key]`, `va chat [--config] [--profile]... [--session ID | --continue] [--agent] [--fake SCRIPT]
-[--show-thinking] [--no-watch]`, `va sessions [--json]`, `va cost [--days N] [--json]`,
+[--show-thinking] [--no-watch]`, `va run [TASK | --task-file F | stdin] [--config] [--profile]... [--agent] [--session]
+[--headless] [--json] [-q] [--remember]` (one non-interactive turn; exit 0 when the turn ended `ok`), `va sessions [--json]`, `va cost [--days N] [--json]`,
 `va memory list|pending|search Q|confirm ID|forget ID|export [-o F]|import F`, `va tree [--config]`, `va doctor [--config]`.
 `serve / propose / history / rollback / reload` exit 2 (later milestones). `VENTRI_HOME` overrides `~/.ventri`.
