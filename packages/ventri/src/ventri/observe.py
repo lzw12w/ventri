@@ -36,6 +36,7 @@ def snapshot(kernel: Kernel) -> dict[str, Any]:
             "staged": f.parent is not None and f.tx is not None,
             "config": _redact(f.raw_config),
             "inject": [keyname(k) for k in f.inject],
+            "optional": [keyname(k) for k in f.optional],
             "scope": f.is_scope,
             "provides": [keyname(b.key) for b in f._bindings],
             "tasks": sum(1 for e in f._effects if e.label.startswith("task:")),
@@ -65,6 +66,8 @@ def render_tree(kernel: Kernel) -> str:
             s += f" config={n['config']!r}"
         if n["inject"]:
             s += f" inject={n['inject']}"
+        if n["optional"]:
+            s += f" optional={n['optional']}"
         if n["provides"]:
             s += f" provides={n['provides']}"
         if n["tasks"]:

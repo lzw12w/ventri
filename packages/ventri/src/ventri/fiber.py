@@ -171,6 +171,7 @@ class Fiber:
 
     @property
     def deps(self) -> tuple:
+        """Required + optional keys; a change in any of their bindings restarts the fiber."""
         return self.spec.deps if self.spec else ()
 
     @property
@@ -293,7 +294,7 @@ class Fiber:
         if spec.config_type is not None and (cfg is None or isinstance(cfg, dict)):
             cfg = spec.config_type(**(cfg or {}))
         self.config = cfg
-        result = spec.call(self.ctx, cfg)
+        result = spec.call(self.ctx, cfg, self._snapshot)
         if spec.is_class:
             self.instance = result
             start = getattr(result, "start", None)
