@@ -1,0 +1,35 @@
+[project]
+name = "ventri-std"
+version = "0.2.0a1"
+description = "Ventri standard plugins: declarative YAML config loader, trace sinks and the `ventri` CLI"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jeff" }]
+dependencies = ["ventri==0.2.0a1", "pyyaml>=6"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "License :: OSI Approved :: MIT License",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+# Reserved extras (DESIGN.md section 7); the polling watcher needs no extra dependency.
+watch = []
+otel = []
+sandbox = []
+
+[project.scripts]
+ventri = "ventri_std.cli:main"
+
+[project.urls]
+Repository = "https://github.com/lzw12w/ventri"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ventri_std"]
