@@ -28,8 +28,12 @@ ventri-agent = { workspace = true }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Lets `pytest` run straight from a checkout even without `uv sync`.
-pythonpath = [".", "packages/ventri/src", "packages/ventri-std/src", "packages/ventri-agent/src"]
+pythonpath = [".", "packages/ventri/src", "packages/ventri-std/src", "packages/ventri-agent/src",
+              "integrations/harbor"]
 markers = ["live: calls the real DeepSeek API (runs only when DEEPSEEK_API_KEY is set; small budget)"]
+
+[tool.pyright]
+extraPaths = ["integrations/harbor"]
 
 [tool.ruff]
 target-version = "py312"
