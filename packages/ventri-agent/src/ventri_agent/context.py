@@ -120,7 +120,7 @@ class ContextBuilder:
         if not items:
             return ""
         lines = ["## Long-term memory (snapshot taken at session start; search more with memory.search)"]
-        lines += [f"- [{m.kind}] {m.text}" for m in items]
+        lines += [f"- [{m.kind}] {m.text} (#{m.id})" for m in items]
         return "\n".join(lines)
 
     def selected_tools(self) -> list[Tool]:

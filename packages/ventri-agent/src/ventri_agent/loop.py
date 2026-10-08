@@ -39,6 +39,7 @@ from .permission import Policy, ToolCheck, ToolRequest
 from .providers.base import ModelProvider, ProviderError, Route, collect, complete_json
 from .providers.pricing import BEIJING
 from .session import Budget, Replay, SessionInfo, SessionLog
+from .threat_patterns import scan_for_threats
 from .tokens import estimate_tokens
 from .tools.registry import Risk, Tool, ToolContext, ToolError, ToolRegistry, call_handler, render_result
 from .tools.registry import validation_message as _vmsg
@@ -462,6 +463,9 @@ class AgentLoop:
         created = []
         for c in value.memories:
             if c.kind not in ("fact", "preference", "procedure", "episode") or not c.text.strip():
+                continue
+            if threat := scan_for_threats(c.text, scope="strict"):   # transcript may quote web pages
+                self.ctx.trace("memory.rejected", session=self.info.id, threats=threat)
                 continue
             item, new = self.memory.add(c.text, c.kind, source_session=self.info.id,
                                         confidence=c.confidence, sensitive=c.sensitive or None)

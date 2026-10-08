@@ -5,10 +5,15 @@
   confidence and a sensitive tag. Search = FTS5 with the ``trigram`` tokenizer
   (works for Chinese without a segmenter) plus a ``LIKE`` fallback for terms
   shorter than three characters.
-* Writes are de-duplicated (normalised text, or character-trigram Jaccard >=
-  0.8 within a kind: merged, confidence = max). Sensitive items (health,
-  finance, credential-like) are stored ``pending`` until the user confirms
-  (``/memory`` or ``va memory confirm``).
+* Writes are de-duplicated only when the normalised text is identical (within
+  a kind; confidence = max). A *near* duplicate (character-trigram Jaccard >=
+  0.8, e.g. "uses PostgreSQL 16" -> "uses PostgreSQL 15") is a correction or
+  refinement: the new item is stored and the old one is marked ``superseded``
+  with a link both ways (``supersedes`` / ``superseded_by``) -- newer wins and
+  nothing is silently dropped. ``update`` can restore a superseded item.
+  Sensitive items (health, finance, credential-like) are stored ``pending``
+  until the user confirms (``/memory`` or ``va memory confirm``); a pending
+  item's supersede takes effect on confirmation.
 * ``WorkingMemory`` (session realm): the current task's notes/plan, readable and
   writable by the model through ``work.read`` / ``work.write``; persisted in
   the session log.
@@ -48,11 +53,26 @@ class MemoryItem:
     updated: float
     confidence: float
     sensitive: bool
-    status: str  # active | pending
+    status: str  # active | pending | superseded
+    supersedes: int | None = None
+    superseded_by: int | None = None
 
     def line(self) -> str:
-        flag = " (pending)" if self.status == "pending" else ""
+        flag = {"pending": " (pending)", "superseded": f" (superseded by #{self.superseded_by})"}.get(self.status, "")
         return f"#{self.id} [{self.kind}] {self.text}{flag}"
+
+
+@dataclass
+class Remembered:
+    """Outcome of :meth:`LongTermMemory.remember`."""
+
+    item: MemoryItem
+    action: Literal["created", "duplicate", "superseded"]
+    previous: MemoryItem | None = None   # the duplicate, or the item ``item`` supersedes
+
+
+def sensitive_text(text: str) -> bool:
+    return bool(_CREDENTIAL.search(text))
 
 
 def _norm(text: str) -> str:
@@ -95,6 +115,10 @@ class LongTermMemory:
                     INSERT INTO memories_fts(memories_fts, rowid, text) VALUES ('delete', old.id, old.text);
                     INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text); END;
             """)
+            cols = {r["name"] for r in self._db.execute("PRAGMA table_info(memories)")}
+            for col in ("supersedes", "superseded_by"):   # v0.2 databases: add the link columns
+                if col not in cols:
+                    self._db.execute(f"ALTER TABLE memories ADD COLUMN {col} INTEGER")
 
     def close(self) -> None:
         self._db.close()
@@ -103,54 +127,108 @@ class LongTermMemory:
         with self._lock:
             rows = self._db.execute(sql, args).fetchall()
         return [MemoryItem(r["id"], r["kind"], r["text"], r["source_session"], r["source_message"],
-                           r["created"], r["updated"], r["confidence"], bool(r["sensitive"]), r["status"])
+                           r["created"], r["updated"], r["confidence"], bool(r["sensitive"]), r["status"],
+                           r["supersedes"], r["superseded_by"])
                 for r in rows]
 
     # ------------------------------------------------------------- writes
     def add(self, text: str, kind: str = "fact", *, source_session: str | None = None,
             source_message: str | None = None, confidence: float = 0.7,
             sensitive: bool | None = None, confirmed: bool = False) -> tuple[MemoryItem, bool]:
-        """Add (or merge into a near-duplicate). Returns ``(item, created)``.
-        Sensitive items are stored as ``pending`` unless ``confirmed``."""
+        """:meth:`remember`, returning ``(item, created)`` (``created`` is False
+        only for an exact duplicate)."""
+        r = self.remember(text, kind, source_session=source_session, source_message=source_message,
+                          confidence=confidence, sensitive=sensitive, confirmed=confirmed)
+        return r.item, r.action != "duplicate"
+
+    def remember(self, text: str, kind: str = "fact", *, source_session: str | None = None,
+                 source_message: str | None = None, confidence: float = 0.7,
+                 sensitive: bool | None = None, confirmed: bool = False) -> Remembered:
+        """Store ``text``. Identical (normalised) text in the same kind is a
+        duplicate; a near duplicate (similarity >= 0.8) is superseded by the new
+        item. Sensitive items are stored as ``pending`` unless ``confirmed``."""
         text = text.strip()
         if not text:
             raise ValueError("empty memory")
         if kind not in KINDS:
             raise ValueError(f"kind must be one of {KINDS}")
         if sensitive is None:
-            sensitive = bool(_CREDENTIAL.search(text))
-        for item in self.list(kind=kind, status=None):
-            if _norm(item.text) == _norm(text) or similar(item.text, text) >= 0.8:
-                longer = text if len(text) > len(item.text) else item.text
+            sensitive = sensitive_text(text)
+        live = [it for it in self.list(kind=kind, status=None) if it.status in ("active", "pending")]
+        norm = _norm(text)
+        for item in live:
+            if _norm(item.text) == norm:
                 with self._lock, self._db:
+                    # only case / spacing / punctuation differ: keep the newer spelling
                     self._db.execute("UPDATE memories SET text=?, confidence=?, updated=? WHERE id=?",
-                                     (longer, max(confidence, item.confidence), now_ts(), item.id))
-                return self.get(item.id) or item, False
+                                     (text, max(confidence, item.confidence), now_ts(), item.id))
+                return Remembered(self.get(item.id) or item, "duplicate", item)
+        best: MemoryItem | None = None
+        best_score = 0.0
+        for item in live:
+            score = similar(item.text, text)
+            if score >= 0.8 and score > best_score:
+                best, best_score = item, score
         status = "pending" if sensitive and not confirmed else "active"
         ts = now_ts()
         with self._lock, self._db:
             cur = self._db.execute(
                 "INSERT INTO memories(kind, text, source_session, source_message, created, updated, "
-                "confidence, sensitive, status) VALUES (?,?,?,?,?,?,?,?,?)",
-                (kind, text, source_session, source_message, ts, ts, confidence, int(sensitive), status))
-            rid = cur.lastrowid
-        item = self.get(int(rid or 0))
+                "confidence, sensitive, status, supersedes) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (kind, text, source_session, source_message, ts, ts, confidence, int(sensitive), status,
+                 best.id if best else None))
+            rid = int(cur.lastrowid or 0)
+            if best is not None and status == "active":
+                self._supersede(best.id, rid)
+        item = self.get(rid)
         assert item is not None
-        return item, True
+        if best is None:
+            return Remembered(item, "created")
+        return Remembered(item, "superseded", self.get(best.id) or best)
 
-    def update(self, item_id: int, text: str) -> None:
+    def _supersede(self, old: int, new: int) -> None:
+        """Caller holds the lock and transaction."""
+        self._db.execute("UPDATE memories SET status='superseded', superseded_by=?, updated=? "
+                         "WHERE id=? AND status IN ('active', 'pending')", (new, now_ts(), old))
+
+    def update(self, item_id: int, text: str, *, sensitive: bool | None = None,
+               confirmed: bool = False) -> MemoryItem | None:
+        """Replace an item's text (a correction). A superseded item becomes
+        active again (its link is cleared; the item that superseded it stays).
+        Text that looks sensitive puts the item back to ``pending`` unless
+        ``confirmed``. Returns the updated item, or None if it does not exist."""
+        text = text.strip()
+        if not text:
+            raise ValueError("empty memory")
+        item = self.get(item_id)
+        if item is None:
+            return None
+        if sensitive is None:
+            sensitive = sensitive_text(text)
+        status = "pending" if sensitive and not confirmed else "active"
         with self._lock, self._db:
-            self._db.execute("UPDATE memories SET text=?, updated=? WHERE id=?", (text.strip(), now_ts(), item_id))
+            self._db.execute("UPDATE memories SET text=?, sensitive=?, status=?, superseded_by=NULL, updated=? "
+                             "WHERE id=?", (text, int(sensitive), status, now_ts(), item_id))
+        return self.get(item_id)
 
     def confirm(self, item_id: int) -> bool:
         with self._lock, self._db:
-            n = self._db.execute("UPDATE memories SET status='active', updated=? WHERE id=? AND status='pending'",
-                                 (now_ts(), item_id)).rowcount
-        return n > 0
+            row = self._db.execute("SELECT supersedes FROM memories WHERE id=? AND status='pending'",
+                                   (item_id,)).fetchone()
+            if row is None:
+                return False
+            self._db.execute("UPDATE memories SET status='active', updated=? WHERE id=?", (now_ts(), item_id))
+            if row["supersedes"] is not None:
+                self._supersede(int(row["supersedes"]), item_id)
+        return True
 
     def forget(self, item_id: int) -> bool:
         with self._lock, self._db:
-            return self._db.execute("DELETE FROM memories WHERE id=?", (item_id,)).rowcount > 0
+            n = self._db.execute("DELETE FROM memories WHERE id=?", (item_id,)).rowcount
+            if n:
+                self._db.execute("UPDATE memories SET supersedes=NULL WHERE supersedes=?", (item_id,))
+                self._db.execute("UPDATE memories SET superseded_by=NULL WHERE superseded_by=?", (item_id,))
+            return n > 0
 
     # -------------------------------------------------------------- reads
     def get(self, item_id: int) -> MemoryItem | None:
@@ -209,7 +287,9 @@ class LongTermMemory:
                 tags = [f"id={it.id}", f"confidence={it.confidence:.2f}"]
                 if it.sensitive:
                     tags.append("sensitive")
-                if it.status != "active":
+                if it.status == "superseded":
+                    tags.append(f"superseded_by={it.superseded_by}")
+                elif it.status != "active":
                     tags.append(it.status)
                 lines.append(f"- {it.text}  <!-- {' '.join(tags)} -->")
             lines.append("")
@@ -217,14 +297,16 @@ class LongTermMemory:
 
     def import_markdown(self, text: str) -> int:
         """Import ``- item`` lines under ``## <kind>`` headings (edited exports).
-        Returns how many new items were created (duplicates merge)."""
+        Returns how many new items were created (exact duplicates are skipped,
+        near duplicates supersede earlier lines; ``superseded`` lines are history
+        and are not imported)."""
         kind, n = "fact", 0
         for raw in text.splitlines():
             line = raw.strip()
             if line.startswith("## "):
                 k = line[3:].strip()
                 kind = k if k in KINDS else "fact"
-            elif line.startswith("- "):
+            elif line.startswith("- ") and "superseded_by=" not in line:
                 body = re.sub(r"\s*<!--.*?-->\s*$", "", line[2:]).strip()
                 if body:
                     n += self.add(body, kind, confirmed=True, sensitive=False)[1]
