@@ -2,7 +2,8 @@
 
 ``open()`` creates ``scope session:<id>`` under the manager's fiber, isolating
 the session services (``SessionInfo``, ``SessionLog``, ``Budget``,
-``WorkingMemory``, ``Grants``, ``ContextBuilder``, ``AgentLoop``, ``Replay``),
+``WorkingMemory``, ``Grants``, ``ContextBuilder``, ``AgentLoop``, ``Replay``,
+``FileState``, ``ShellJobs``),
 and loads into it: session-core -> permission-gate -> context-builder ->
 agent-loop (or the preset's ``loop``). Lifecycle:
 
@@ -48,9 +49,10 @@ from .session import (
 )
 from .tools._hermes_fs.state import FileState
 from .tools.registry import ToolRegistry
+from .tools.shell import ShellJobs
 
 SESSION_KEYS = (SessionInfo, SessionLog, Budget, WorkingMemory, Grants, ContextBuilder, AgentLoop, Replay,
-                FileState)
+                FileState, ShellJobs)
 
 
 class SessionError(Exception):
@@ -75,6 +77,9 @@ def _core(info: SessionInfo, replay: Replay, limits: BudgetLimits) -> Any:
         # scoped to this session and dropped when the session scope is disposed
         files = ctx.provide(FileState, FileState(info.id))
         ctx.on_dispose(files.close)
+        # background shell jobs + persisted shell cwd/env; disposing the session kills its jobs
+        jobs = ctx.provide(ShellJobs, ShellJobs(info.id))
+        ctx.on_dispose(jobs.close)
         if not info.resumed:
             log.append("meta", id=info.id, agent=info.agent.name, channel=info.channel, origin=info.origin)
         else:
