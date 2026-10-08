@@ -646,10 +646,12 @@ async def _add(tx: Any, parent: Fiber, e: Entry) -> None:
 
 async def apply_document(parent: Fiber, doc: Document, *, dry_run: bool = False,
                          strict: bool = False, reason: str | None = None,
-                         timeout: float | None = None) -> ApplyResult:
+                         timeout: float | None = None,
+                         on_staged: Callable[[Any], Any] | None = None) -> ApplyResult:
     """Apply ``doc`` under ``parent`` as one transaction (``origin="config"``).
     Returns an :class:`ApplyResult`; a failed transaction is rolled back (the
-    previous configuration keeps serving) and reported, not raised."""
+    previous configuration keeps serving) and reported, not raised.
+    ``on_staged(tx)`` runs after staging, before commit (used by ``ventri tree``)."""
     p = plan(parent, doc)
     if p.empty:
         return ApplyResult(p, None, doc)
@@ -659,6 +661,8 @@ async def apply_document(parent: Fiber, doc: Document, *, dry_run: bool = False,
     try:
         async with tx:
             await _stage(tx, parent, doc.entries)
+            if on_staged is not None:
+                on_staged(tx)
     except (TransactionError, PluginError):
         pass  # rolled back; tx.report carries the outcome and error
     return ApplyResult(p, tx.report, doc)

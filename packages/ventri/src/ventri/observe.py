@@ -23,6 +23,7 @@ def snapshot(kernel: Kernel) -> dict[str, Any]:
         return {
             "id": f.id,
             "name": f.name,
+            "cid": f.meta.get("config_id"),
             "state": f.state.value,
             "staged": f.parent is not None and f.tx is not None,
             "config": redact(f.raw_config),
@@ -51,6 +52,8 @@ def render_tree(kernel: Kernel) -> str:
 
     def fmt(n: dict) -> str:
         s = f"{n['name']}#{n['id']} [{n['state']}]"
+        if n["cid"] is not None:
+            s = f"{n['cid'].rsplit('/', 1)[-1]}: " + s
         if n["staged"]:
             s += " (staged)"
         if n["config"] is not None:
