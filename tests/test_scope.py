@@ -227,3 +227,31 @@ async def test_scope_dispose_cancels_tasks_and_listeners_of_all_descendants():
         assert sorted(cancelled) == ["p", "p"]
         assert app._listeners.get("x") == []
         assert app.fiber.children == []
+
+
+async def test_scope_disposed_during_its_transaction_fails_the_transaction():
+    """Regression (chaos seed 869): disposing a scope while a transaction has staged
+    plugins under it must fail the transaction, not commit bindings of disposed
+    fibers into the root realm."""
+    from ventri import TransactionError
+
+    async with Kernel() as app:
+        s = await app.scope("session:x", isolate=["llm"])
+        baseline = app.snapshot()
+        with pytest.raises(TransactionError, match="disposed"):
+            async with s.ctx.transaction() as tx:
+                await tx.plugin(lambda ctx, config: ctx.provide("cache", 1))
+                await s.dispose()
+        assert "cache" not in app._services
+        assert s.state is State.DISPOSED
+        assert app.snapshot()["services"] == baseline["services"]
+    assert app._services == {}
+
+
+async def test_staged_child_of_disposed_staged_parent_is_not_committed():
+    async with Kernel() as app:
+        async with app.transaction() as tx:
+            g = await tx.plugin(lambda ctx, config: None)
+            await tx.plugin(lambda ctx, config: ctx.provide("k", 1), parent=g)
+            await tx.dispose(g)  # drops the staged subtree from the transaction
+        assert "k" not in app._services and not app.fiber.children

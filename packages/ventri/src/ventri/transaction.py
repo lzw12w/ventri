@@ -333,9 +333,9 @@ class Transaction:
     async def dispose(self, fiber: Fiber) -> None:
         """Stage removal of a live fiber (it keeps running until commit)."""
         self._check()
-        if fiber.tx is self:  # staged in this very transaction: just drop it
-            if fiber in self._staged:
-                self._staged.remove(fiber)
+        if fiber.tx is self:  # staged in this very transaction: just drop it (and its subtree)
+            sub = self._subtree(fiber)
+            self._staged = [f for f in self._staged if f not in sub]
             await fiber.dispose()
             return
         if fiber.tx is not None or fiber.parent is None or not self._in_scope(fiber):
@@ -433,6 +433,13 @@ class Transaction:
         return out
 
     def _validate(self) -> None:
+        # Synchronous with _swap: nothing can change between these checks and the swap.
+        if self.scope.state is State.DISPOSED or self.scope._dispose_requested:
+            raise TransactionError(f"transaction scope {self.scope.label} was disposed")
+        for f in self._staged:
+            if f._dispose_requested or f.state in (State.UNLOADING, State.DISPOSED):
+                raise TransactionError(
+                    f"{f.label} was disposed during the transaction (its parent went away)")
         removed = self._removed()
         for (realm, key), b in self._overlay.items():
             cur = realm.services.get(key)
