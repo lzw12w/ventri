@@ -18,27 +18,16 @@ appends a notice and takes effect at the next epoch (``/epoch`` or the next
 compaction). **Compaction** rewrites the prefix once, replacing the oldest
 turns with a summary made by the cheap route, when the history passes 60% of
 the soft context limit -- never a rolling truncation.
-
-**Pruning** (opt-in per agent preset, ``prune_tokens``) keeps long agentic turns
-lean without giving up the cache: once the context passes ``prune_tokens``,
-older large tool results (all but the newest ``prune_keep``) are replaced by a
-short stub pointing at an artifact with the full text, and long string
-arguments / reasoning of the same older steps are shortened. It runs only when
-it saves at least a quarter of the threshold, so it happens in rare, large
-steps: each one costs a single cache miss from the first edited message, after
-which requests extend the smaller prefix again. Edits are logged (``prune``
-record) and re-applied on replay, so a resumed session sends the same bytes.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from .memory import LongTermMemory
-from .messages import ChatRequest, Message, ToolCall
+from .messages import ChatRequest, Message
 from .paths import expand
 from .providers.base import ModelProvider, Route
 from .session import Replay, SessionInfo, SessionLog
@@ -91,13 +80,6 @@ services, test fixtures, accounts or data the task created unless the task asks 
 - Finish with a short summary of what was done and how it was verified."""
 
 COMPACTION_TRIGGER = 0.6  # of the soft context limit
-PRUNE_MIN_TOKENS = 250      # tool results smaller than this are never pruned
-PRUNE_HEAD_CHARS = 400      # snippet kept in a pruned tool result's stub
-ARG_LIMIT_CHARS = 1_200     # older tool-call arguments longer than this get long strings elided
-ARG_KEEP_CHARS = 200
-REASONING_LIMIT_CHARS = 1_200
-REASONING_KEEP_CHARS = 400
-_FENCE = re.compile(r'^<tool-output tool="([^"]*)" trust="untrusted">\n', re.DOTALL)
 
 
 @dataclass
@@ -133,7 +115,6 @@ class ContextBuilder:
         self.history: list[Message] = []
         self.seq = 0
         self.notified_version: int | None = None
-        self._pruned_to = 0                     # context size right after the last prune
         r = replay or Replay()
         if r.prefix is not None:
             p = r.prefix
@@ -142,8 +123,6 @@ class ContextBuilder:
             self.history = list(r.history)
             self.seq = r.total_messages
             self.repair()
-            if r.prunes:
-                self._pruned_to = self.estimate_tokens()
         else:
             self.epoch = self._make_epoch(1)
             self._log_epoch()
@@ -284,74 +263,6 @@ class ContextBuilder:
         return route.request(msgs, tools=self.epoch.tools if tools else [], tool_choice=tool_choice,
                              strict=self.epoch.strict and tools, **kw)
 
-    # ------------------------------------------------------------ pruning
-    def maybe_prune(self, used: int | None = None) -> dict[str, int] | None:
-        """Prune older large tool results / arguments / reasoning when the
-        context passed the preset's ``prune_tokens`` and the edit saves at least
-        a quarter of it. Returns ``{"messages": n, "saved": tokens}`` or None."""
-        limit = self.info.agent.prune_tokens
-        if limit <= 0:
-            return None
-        if used is None:
-            used = self.estimate_tokens()
-        # hysteresis: at most one prune per limit/2 tokens of growth, and only a big one
-        if used < limit or used - self._pruned_to < limit // 2:
-            return None
-        edits, saved = self._prune_plan()
-        if not edits or saved < max(limit // 4, 2_000):
-            return None
-        self.log.append("prune", edits=edits, saved=saved)
-        self.history = apply_prune(self.history, edits)
-        self._pruned_to = self.estimate_tokens()
-        return {"messages": len(edits), "saved": saved}
-
-    def _prune_plan(self) -> tuple[list[dict[str, Any]], int]:
-        keep = max(0, self.info.agent.prune_keep)
-        tool_idx = [i for i, m in enumerate(self.history) if m.role == "tool"]
-        if len(tool_idx) <= keep:
-            return [], 0
-        cut = tool_idx[-keep] if keep else len(self.history)
-        # never split an assistant message from its tool results: cut before the assistant
-        while cut > 0 and self.history[cut - 1].role == "tool":
-            cut -= 1
-        if cut > 0 and self.history[cut - 1].role == "assistant":
-            cut -= 1
-        names = {tc.id: tc.name for m in self.history[:cut] if m.role == "assistant" for tc in m.tool_calls}
-        edits: list[dict[str, Any]] = []
-        saved = 0
-        art = self.info.dir / "artifacts"
-        for m in self.history[:cut]:
-            seq = m.meta.get("seq")
-            if seq is None or m.meta.get("pruned"):
-                continue
-            edit: dict[str, Any] = {}
-            if m.role == "tool" and m.content and estimate_tokens(m.content) > PRUNE_MIN_TOKENS:
-                handle = re.sub(r"[^A-Za-z0-9_\-.]", "_", f"{m.tool_call_id or 'seq' + str(seq)}-full")
-                art.mkdir(parents=True, exist_ok=True)
-                (art / f"{handle}.txt").write_text(m.content, encoding="utf-8")
-                stub = _stub(m.content, names.get(m.tool_call_id or "", str(m.meta.get("tool", "tool"))), handle)
-                edit["content"] = stub
-                saved += estimate_tokens(m.content) - estimate_tokens(stub)
-            if m.role == "assistant":
-                args: dict[str, str] = {}
-                for tc in m.tool_calls:
-                    if len(tc.arguments) > ARG_LIMIT_CHARS:
-                        short = _elide_args(tc.arguments)
-                        if short != tc.arguments:
-                            args[tc.id] = short
-                            saved += estimate_tokens(tc.arguments) - estimate_tokens(short)
-                if args:
-                    edit["args"] = args
-                rc = m.reasoning_content or ""
-                if len(rc) > REASONING_LIMIT_CHARS:
-                    short_rc = rc[:REASONING_KEEP_CHARS] + f"\n[... earlier reasoning shortened ({len(rc)} chars)]"
-                    edit["reasoning"] = short_rc
-                    saved += estimate_tokens(rc) - estimate_tokens(short_rc)
-            if edit:
-                edit["seq"] = seq
-                edits.append(edit)
-        return edits, saved
-
     # --------------------------------------------------------- compaction
     def estimate_tokens(self) -> int:
         return sum(estimate_tokens(json.dumps(m.to_api(), ensure_ascii=False))
@@ -376,57 +287,6 @@ class ContextBuilder:
     def apply_compaction(self, drop: int, summary: str) -> None:
         self.log.append("compact", drop=drop, summary=summary)
         self.history = [Message.system(summary, compacted=drop), *self.history[drop:]]
-
-
-def _stub(content: str, tool: str, handle: str) -> str:
-    m = _FENCE.match(content)
-    inner = content[m.end():] if m else content
-    if m:
-        inner = inner.split("\n</tool-output>", 1)[0]
-    head = inner[:PRUNE_HEAD_CHARS].rstrip()
-    note = (f"[older {tool} result pruned to save context: {len(content)} chars, ~{estimate_tokens(content)} "
-            f"tokens; the full text is artifact {handle!r}: artifact.read(handle={handle!r})]")
-    if m:
-        return (f"{note}\n<tool-output tool=\"{m.group(1)}\" trust=\"untrusted\">\n{head}\n[...]\n"
-                "</tool-output>")
-    return f"{note}\n{head}\n[...]"
-
-
-def _elide_args(arguments: str) -> str:
-    try:
-        data = json.loads(arguments)
-    except ValueError:
-        return arguments
-    if not isinstance(data, dict):
-        return arguments
-
-    def short(v: Any) -> Any:
-        if isinstance(v, str) and len(v) > ARG_KEEP_CHARS * 2:
-            return v[:ARG_KEEP_CHARS] + f"...[{len(v) - ARG_KEEP_CHARS} chars elided from this older call]"
-        if isinstance(v, list):
-            return [short(x) for x in v]
-        if isinstance(v, dict):
-            return {k: short(x) for k, x in v.items()}
-        return v
-    return json.dumps({k: short(v) for k, v in data.items()}, ensure_ascii=False)
-
-
-def apply_prune(history: list[Message], edits: list[dict[str, Any]]) -> list[Message]:
-    """Apply logged prune edits (by message ``seq``); edited messages are new
-    objects (requests already sent keep what they sent)."""
-    by_seq = {int(e["seq"]): e for e in edits}
-    out: list[Message] = []
-    for m in history:
-        e = by_seq.get(int(m.meta.get("seq", -1)))
-        if e is None:
-            out.append(m)
-            continue
-        args = e.get("args", {})
-        out.append(replace(
-            m, content=e.get("content", m.content), reasoning_content=e.get("reasoning", m.reasoning_content),
-            tool_calls=[ToolCall(tc.id, tc.name, args.get(tc.id, tc.arguments)) for tc in m.tool_calls],
-            meta={**m.meta, "pruned": True}))
-    return out
 
 
 def context_builder(ctx: Any, config: Any, info: SessionInfo, log: SessionLog, provider: ModelProvider,

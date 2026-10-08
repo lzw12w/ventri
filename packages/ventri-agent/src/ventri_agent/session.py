@@ -9,8 +9,8 @@
   disk cache keeps hitting after a restart
 * ``msg``      -- one history message (user / assistant incl. reasoning_content / tool / system tail)
 * ``compact``  -- ``drop`` leading history messages replaced by ``summary``
-* ``prune``    -- edits (by message ``seq``) that replaced older large tool
-  results / arguments / reasoning with stubs (``ContextBuilder.maybe_prune``)
+* ``prune``    -- written only by 0.2.0a1 development builds (removed context
+  pruning); ignored on replay, so such a log loads with the full messages
 * ``usage``    -- one model call: model, route, usage, cost, peak flag
 * ``turn``     -- turn boundary (status, steps)
 * ``work``     -- working-memory snapshot
@@ -41,8 +41,6 @@ class AgentPreset:
     system_prompt: str = ""                # file or inline text; replaces persona + built-in rules entirely
     time_notes: bool | None = None         # current-time / peak-pricing notes (None: on, off when headless)
     mode: str = "interactive"              # "headless": only opened by unattended runs (`va run`)
-    prune_tokens: int = 0                  # context pruning threshold (0: off), see ContextBuilder.prune
-    prune_keep: int = 6                    # most recent tool results never pruned
     inline_tokens: int = 8_000             # a tool result above this is stored as an artifact (head + tail inline)
 
 
@@ -75,7 +73,6 @@ class Replay:
     extracted_upto: int = 0                # count of history messages already mined for memory
     last_prompt_tokens: int = 0
     compactions: int = 0
-    prunes: int = 0
     total_messages: int = 0                # messages ever appended (incl. compacted ones)
 
 
@@ -126,9 +123,7 @@ class SessionLog:
                     r.history = [Message.system(rec["summary"], compacted=drop), *r.history[drop:]]
                     r.compactions += 1
                 elif t == "prune":
-                    from .context import apply_prune
-                    r.history = apply_prune(r.history, list(rec.get("edits") or []))
-                    r.prunes += 1
+                    pass  # removed feature (0.2.0a1 dev builds): keep the full, unedited messages
                 elif t == "usage":
                     u = Usage.from_json(rec.get("usage") or {})
                     r.usage = r.usage + u

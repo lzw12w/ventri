@@ -190,8 +190,6 @@ class SessionManager:
                                     memory_k=int(spec.get("memory_k", 12)),
                                     system_prompt=str(spec.get("system_prompt", "") or ""),
                                     time_notes=None if tn is None else bool(tn), mode=mode,
-                                    prune_tokens=int(spec.get("prune_tokens", 0)),
-                                    prune_keep=int(spec.get("prune_keep", 6)),
                                     inline_tokens=int(spec.get("inline_tokens", 8_000)))
         return out
 

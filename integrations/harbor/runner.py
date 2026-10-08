@@ -107,8 +107,7 @@ async def amain(a: argparse.Namespace) -> int:
                 "agents": {"harbor": {
                     "system_prompt": system_prompt(cwd, shell_timeout, a.wall),
                     "tools": ["time.now", "artifact.read", "work.*", "fs.*", "shell.*"],
-                    "route": "default", "mode": "headless",
-                    "prune_tokens": a.prune_tokens, "prune_keep": 6}}})
+                    "route": "default", "mode": "headless"}}})
             mgr = k.get(SessionManager)
             s = await mgr.open(agent="harbor", channel="harbor", headless=True)
 
@@ -151,7 +150,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--shell-timeout", type=float, default=600)
     ap.add_argument("--wall", type=float, required=True, help="Ventri's own time budget (seconds)")
     ap.add_argument("--grace", type=float, default=20, help="hard stop after wall + grace")
-    ap.add_argument("--prune-tokens", type=int, default=40_000)
     ap.add_argument("--base-env-file", default=None)
     return anyio.run(amain, ap.parse_args(argv), backend="asyncio")
 

@@ -3,8 +3,8 @@ Agent Trajectory Interchange Format, ``harbor.models.trajectories``).
 
 Plain dicts, no Harbor import: ``VentriAgent`` validates the result with
 ``Trajectory.model_validate`` when Harbor is available. The trajectory is the
-full, unpruned record (``msg`` records as appended; ``prune`` / ``compact``
-records only change what later requests sent, not what happened).
+full record (``msg`` records as appended; ``compact`` records only change
+what later requests sent, not what happened).
 
 Mapping: the epoch's system prompt is step 1 (``source: system``, tool specs
 go to ``agent.tool_definitions``); user messages -> ``user`` steps; context
@@ -155,7 +155,6 @@ def session_to_atif(records: list[dict[str, Any]], *, agent_name: str = "ventri-
                           "total_cached_tokens": totals["cached"], "total_cost_usd": round(totals["cost"], 8),
                           "total_steps": len(steps),
                           "extra": {"model_calls": sum(1 for r in records if r.get("t") == "usage"),
-                                    "prunes": sum(1 for r in records if r.get("t") == "prune"),
                                     "compactions": sum(1 for r in records if r.get("t") == "compact"),
                                     "headless": bool(meta.get("headless"))}},
     }

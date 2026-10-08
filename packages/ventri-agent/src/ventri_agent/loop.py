@@ -192,12 +192,6 @@ class AgentLoop:
                 route = self.route
                 if self.builder.needs_compaction(route, self.last_prompt_tokens):
                     await self.compact(sink)
-                pruned = self.builder.maybe_prune()
-                if pruned:
-                    self.ctx.trace("context.prune", session=self.info.id, **pruned)
-                    await _emit(sink, TurnEvent("notice", self.info.id,
-                                                f"pruned {pruned['messages']} older messages "
-                                                f"(~{pruned['saved']} tokens) to artifacts", pruned))
                 req = self.builder.build(route)
                 try:
                     done = await self._call(req, sink, route)

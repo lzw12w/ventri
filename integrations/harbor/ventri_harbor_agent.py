@@ -47,7 +47,7 @@ class VentriAgent(BaseInstalledAgent):
     SUPPORTS_ATIF = True
 
     def __init__(self, *args: Any, effort: str = "high", max_steps: int = 250, max_cost_usd: float = 0.5,
-                 shell_timeout: int = 600, wall_sec: int = 870, prune_tokens: int = 40_000,
+                 shell_timeout: int = 600, wall_sec: int = 870,
                  **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.effort = effort
@@ -55,7 +55,6 @@ class VentriAgent(BaseInstalledAgent):
         self.max_cost_usd = float(max_cost_usd)
         self.shell_timeout = int(shell_timeout)
         self.wall_fallback = float(wall_sec)       # only when the task timeout cannot be resolved
-        self.prune_tokens = int(prune_tokens)
         self.rt = f"/usr/local/lib/.vrt-{secrets.token_hex(4)}"
         self._version: str | None = None
 
@@ -131,7 +130,7 @@ class VentriAgent(BaseInstalledAgent):
                          f"--instruction-file /installed-agent/instruction.md --out {out / 'ventri'} "
                          f"--effort {shlex.quote(self.effort)} --max-steps {self.max_steps} "
                          f"--max-cost-usd {self.max_cost_usd} --shell-timeout {self.shell_timeout} "
-                         f"--wall {wall:.0f} --prune-tokens {self.prune_tokens} --base-env-file {envf} "
+                         f"--wall {wall:.0f} --base-env-file {envf} "
                          f"2>&1 | tail -c 20000 > {out / 'ventri-stdout.txt'}"),
                 env={"VENTRI_DS_KEY_FILE": kpath, "PYTHONUNBUFFERED": "1"},
             )

@@ -22,7 +22,7 @@ PYTHONPATH=$PWD/integrations/harbor harbor run -p datasets/terminal-bench-2-1 -i
 ```
 
 Agent kwargs (`--agent-kwarg k=v`): `effort` (high), `max_steps` (250), `max_cost_usd` (0.5 per trial),
-`shell_timeout` (600 s per foreground command), `prune_tokens` (40000; 0 disables context pruning),
+`shell_timeout` (600 s per foreground command),
 `wall_sec` (870, only used when the task timeout cannot be resolved).
 
 > Status: the adapter was moved here and reworked (headless mode, task timeout, ATIF) after the
