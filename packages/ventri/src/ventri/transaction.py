@@ -39,8 +39,9 @@ from .errors import (
     TransactionError,
     TransactionTimeout,
 )
-from .fiber import Fiber, State, task_local
+from .fiber import Fiber, State, maybe_await, task_local
 from .plugin import MISSING, keyname
+from .report import TxReport
 
 if TYPE_CHECKING:  # pragma: no cover
     from .context import Context
@@ -121,14 +122,24 @@ class Transaction:
 
     def __init__(self, ctx: Context, *, wait: bool = True, strict: bool = False,
                  origin: str | None = None, reason: str | None = None,
-                 timeout: float | None = None) -> None:
+                 timeout: float | None = None, dry_run: bool = False,
+                 probe: Any = None) -> None:
         self.ctx, self.kernel = ctx, ctx.kernel
         self.wait, self.strict = wait, strict
         self.origin, self.reason, self.timeout = origin, reason, timeout
+        self.dry_run = dry_run
+        if probe is None:
+            self.probes: dict[str, Any] = {}
+        elif callable(probe):
+            self.probes = {getattr(probe, "__name__", "probe"): probe}
+        else:
+            self.probes = dict(probe)
         self.id = next(self.kernel._tx_ids)
         self.scope: Fiber = ctx.fiber.scope_fiber
         self.state = "new"   # new -> open -> committed | rolled_back
         self.error: BaseException | None = None
+        self.report = TxReport(self.id, origin, reason, dry_run)
+        self._collected = False
         self._locks: list[tuple[RWLock, bool]] = []
         self._deadline: float | None = None
         self._cs: anyio.CancelScope | None = None
@@ -145,6 +156,8 @@ class Transaction:
         out: dict[str, Any] = {"tx": self.id}
         if self.origin is not None:
             out["origin"] = self.origin
+        if self.dry_run:
+            out["dry_run"] = True
         if self.reason is not None:
             out["reason"] = self.reason
         if self.scope is not self.kernel.fiber:
@@ -204,21 +217,49 @@ class Transaction:
                 if et is not None:
                     await self._rollback(exc)
                     return False
+                if self.dry_run:
+                    await self._dry_exit()
+                    return False
                 try:
-                    with anyio.CancelScope(deadline=self._deadline or float("inf")) as prep:
-                        await self._prepare()
-                    if prep.cancelled_caught:
-                        raise TransactionTimeout(
-                            f"transaction #{self.id} timed out after {self.timeout}s (during commit)")
+                    await self._prepare()
+                    await self._run_probes(raise_errors=True)
                     self._validate()
                 except BaseException as e:
                     await self._rollback(e)
                     raise
+                self._collect()
                 self._swap()           # point of no return, synchronous
                 await self._finish()
+                self.report.outcome = "committed"
                 return False
         finally:
             self._release()
+
+    async def _dry_exit(self) -> None:
+        """Dry run: settle and check everything like a commit, run the probes, record
+        the report -- then always roll back."""
+        error: BaseException | None = None
+        try:
+            await self._prepare()
+            self._validate()
+        except Exception as e:  # noqa: BLE001 - recorded in the report
+            error = e
+        await self._run_probes(raise_errors=False)
+        await self._rollback(error, outcome="dry_run")
+
+    async def _run_probes(self, *, raise_errors: bool) -> None:
+        for name, fn in self.probes.items():
+            try:
+                with anyio.CancelScope(deadline=self._deadline or float("inf")) as cs:
+                    value = await maybe_await(fn(self))
+                if cs.cancelled_caught:
+                    raise TransactionTimeout(f"probe {name!r} timed out")
+            except Exception as e:
+                self.report.probes[name] = {"ok": False, "value": None, "error": repr(e)}
+                if raise_errors:
+                    raise TransactionError(f"probe {name!r} failed: {e!r}") from e
+            else:
+                self.report.probes[name] = {"ok": True, "value": value, "error": None}
 
     # ----------------------------------------------------------- operations
     def _check(self) -> None:
@@ -245,9 +286,22 @@ class Transaction:
         self._staged.append(f)
         async with self.kernel._op(self):
             await f._activate()
-        if f.state is State.FAILED:
+        if f.state is State.FAILED and not self.dry_run:  # a dry run reports instead
             raise PluginError(f"{f.label} failed: {f.error!r}") from f.error
         return f
+
+    def get(self, key: Any, default: Any = _MISSING) -> Any:
+        """Resolve ``key`` as the transaction sees it (staged bindings and
+        tombstones applied) from the transaction's context -- for probes."""
+        from .errors import ServiceNotFound
+
+        k, f = self.kernel, self.ctx.fiber
+        b = k._lookup(k._realm_of(f, key), key, self)
+        if b is None:
+            if default is _MISSING:
+                raise ServiceNotFound(keyname(key))
+            return default
+        return b.value
 
     async def plugin(self, plugin: Any, config: Any = None, *, parent: Fiber | None = None,
                      meta: dict | None = None, timeout: Any = _MISSING,
@@ -326,7 +380,11 @@ class Transaction:
         return [f for f in self.kernel._walk() if f.tx is self]
 
     async def _prepare(self) -> None:
-        await self.kernel._settle(self, full=True)
+        with anyio.CancelScope(deadline=self._deadline or float("inf")) as cs:
+            await self.kernel._settle(self, full=True)
+        if cs.cancelled_caught:
+            raise TransactionTimeout(
+                f"transaction #{self.id} timed out after {self.timeout}s (during commit)")
         for f in self._staged_fibers():
             if f.state is State.FAILED:
                 raise TransactionError(f"{f.label} failed: {f.error!r}") from f.error
@@ -348,6 +406,47 @@ class Transaction:
             if b is not None and cur is not None and cur.owner not in removed:
                 raise TransactionConflict(
                     f"{keyname(key)} was provided by {cur.owner.label} during the transaction")
+
+    def _realm_key(self, realm: Realm, key: Any) -> str:
+        return keyname(key) if realm is self.kernel._root_realm else f"{realm.name}:{keyname(key)}"
+
+    def _collect(self) -> None:
+        """Fill the report from the staged world (before swap / rollback)."""
+        if self._collected:
+            return
+        self._collected = True
+        k, r = self.kernel, self.report
+        removed = self._removed()
+        staged = self._staged_fibers()
+        r.added = {f.label: f.state.value for f in staged}
+        r.failures = {f.label: repr(f.error) for f in staged if f.state is State.FAILED}
+        r.pending = {f.label: f.pending_reason or "pending" for f in staged
+                     if f.state is State.PENDING and not f._parked}
+        live = [f for f in k._walk() if f.tx is None]
+        r.removed = [f.label for f in live if f in removed]
+        r.replaced = {new.label: old.label for new, old in self._replaces.items()}
+        svc: dict[str, list[str]] = {"added": [], "removed": [], "replaced": []}
+        for (realm, key), b in self._overlay.items():
+            cur = realm.services.get(key)
+            name = self._realm_key(realm, key)
+            if b is None:
+                if cur is not None and cur.owner in removed:
+                    svc["removed"].append(name)
+            elif cur is not None:
+                svc["replaced"].append(name)
+            else:
+                svc["added"].append(name)
+        r.services = svc
+        for f in live:
+            if f in removed:
+                continue
+            if f.state is State.ACTIVE:
+                if any(k._lookup(k._realm_of(f, key), key, self) is not f._snapshot.get(key)
+                       for key in f.deps):
+                    r.restarted.append(f.label)
+            elif f.state is State.PENDING and f.inject and not f._dispose_requested and all(
+                    k._lookup(k._realm_of(f, key), key, self) is not None for key in f.inject):
+                r.activated.append(f.label)
 
     def _swap(self) -> None:
         """Apply the overlay to the live registry. MUST stay free of awaits."""
@@ -387,8 +486,12 @@ class Transaction:
         # 3. reactivate everything that can run now
         await k._settle(None, full=True)
 
-    async def _rollback(self, error: BaseException | None) -> None:
+    async def _rollback(self, error: BaseException | None, outcome: str = "rolled_back") -> None:
         self.error = error
+        self._collect()
+        self.report.outcome = outcome
+        if error is not None:
+            self.report.error = repr(error)
         for f in reversed(self._staged):
             await f._dispose()
         for f in self._staged_fibers():  # defensive: anything left staged

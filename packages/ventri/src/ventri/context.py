@@ -242,15 +242,20 @@ class Context:
     # ----------------------------------------------------------- transactions
     def transaction(self, *, wait: bool = True, strict: bool = False,
                     origin: str | None = None, reason: str | None = None,
-                    timeout: float | None = None) -> Transaction:
+                    timeout: float | None = None, dry_run: bool = False,
+                    probe: Any = None) -> Transaction:
         """``async with ctx.transaction() as tx: ...`` -- see transaction.py.
 
         A transaction opened inside a scope only locks that scope (plus shared
-        locks on its ancestors), so sessions do not block each other."""
+        locks on its ancestors), so sessions do not block each other.
+        ``dry_run=True`` stages and settles everything for real, runs ``probe``
+        (a callable ``probe(tx)`` or a ``{name: callable}`` dict; use ``tx.get``
+        to see the staged world), then *always* rolls back; ``tx.report`` is the
+        resulting TxReport. Every transaction fills ``tx.report``."""
         from .transaction import Transaction
 
         return Transaction(self, wait=wait, strict=strict, origin=origin, reason=reason,
-                           timeout=timeout)
+                           timeout=timeout, dry_run=dry_run, probe=probe)
 
     async def replace(self, fiber: Fiber, plugin_or_config: Any = _MISSING, *,
                       plugin: Any = _MISSING, config: Any = _MISSING) -> Fiber:

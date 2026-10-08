@@ -17,6 +17,7 @@ from .errors import (
 from .fiber import Fiber, State, TaskHandle
 from .kernel import Binding, Kernel, Realm, TraceEvent
 from .plugin import Retry, plugin
+from .report import TxReport
 from .transaction import Transaction
 
 __version__ = "0.2.0a1"
@@ -42,5 +43,6 @@ __all__ = [
     "TransactionConflict",
     "TransactionError",
     "TransactionTimeout",
+    "TxReport",
     "plugin",
 ]
