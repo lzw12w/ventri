@@ -156,11 +156,20 @@ Session-scope plugins loaded by `SessionManager.open` (not used directly in `ven
 `permission.gate` (provides `Grants`, intercepts `ToolCheck`), `context.context_builder` (`ContextBuilder`),
 `loop.agent_loop` (`AgentLoop`; replaceable per agent preset with `agents: {name: {loop: "<use>"}}`).
 Top-level `agents: {name: {persona, tools: [globs], route, loop, memory_k, system_prompt, time_notes, mode,
-inline_tokens, compact_at, compact_keep_turns, compact_keep_steps}}` in `ventri.yml` defines presets. `system_prompt`
-(file or inline) replaces persona + rules; `time_notes` (default on, off when headless); `mode: headless` presets open
-only with `headless=True`; `inline_tokens` (8000) is the artifact spill threshold; compaction triggers at `compact_at`
-(0.6, range 0.1-0.95) x the model's soft context, keeps the last `compact_keep_turns` (4) user turns and, inside a long
-turn, the last `compact_keep_steps` (6) model steps.
+inline_tokens, compact_at, compact_keep_turns, compact_keep_steps, compact_args_tokens}}` in `ventri.yml` defines
+presets. `system_prompt` (file or inline) replaces persona + rules; `time_notes` (default on, off when headless);
+`mode: headless` presets open only with `headless=True`; `inline_tokens` (8000) is the artifact spill threshold;
+compaction triggers at `compact_at` (0.6, range 0.1-0.95) x the model's soft context, keeps the last
+`compact_keep_turns` (4) user turns and, inside a long turn, the last `compact_keep_steps` (6) model steps.
+`compact_args_tokens` (4000; 0 = off, otherwise >= 1000): at each compaction (never on a normal step), every string value
+above this many estimated tokens in the arguments of the *retained* tool calls (e.g. a big `fs.write` `content`, a long
+`shell.run` script) becomes head + tail around `…[truncated N chars …; full value in artifact '<call_id>-args-<key
+path>': artifact.read(…)]…`, with the full value stored as that artifact. The arguments stay valid JSON with the same
+keys and types (an array that is still too big keeps its first and last items around one marker item). As a last
+resort compaction also shortens argument strings above 2000 tokens, like oversized tool results. The shortened texts
+are part of the `compact` record (`args: [{seq, calls: {call_id: arguments}}]`), so a resumed session rebuilds the same
+bytes. `ContextBuilder.compaction_plan(...)` returns a `CompactionPlan` whose `args` lists them (`kind` contains
+`"args"`); `ventri_agent.context.shrink_arguments(call_id, arguments, budget)` is the pure transform.
 
 ### Types
 

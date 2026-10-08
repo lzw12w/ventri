@@ -2,6 +2,8 @@
 
     uv run python benchmarks/context_replay.py SESSION.jsonl [--trigger 32000 48000] [--json]
     uv run python benchmarks/context_replay.py --synthetic [--steps 300]   # no log needed
+    uv run python benchmarks/context_replay.py --synthetic --big-writes 6 --trigger   # 6 x 50K-char fs.write
+    uv run python benchmarks/context_replay.py --synthetic --burst 8 --trigger        # one step, 8 parallel writes
 
 The recorded assistant messages (reasoning, content, tool calls) are fed back
 through the real AgentLoop / ContextBuilder with the scripted FakeProvider, and
@@ -16,6 +18,13 @@ hits the longest persisted prefix unit it extends) and estimates tokens with
 ``ventri_agent.tokens.estimate_tokens``; cost uses Ventri's DeepSeek price
 table at peak time. Absolute numbers differ from the API's tokenizer; the
 ratios between policies are the point.
+
+``--big-writes K`` appends K steps that each ``fs.write`` a ``--big-chars``
+(50K) character file, ``--burst K`` one step with K such writes in parallel
+(arguments, not results, are what is big); ``--window N`` sets the model's
+context window (the hard limit is N minus the 32K reply reserve). The table
+then also shows each compaction (``before->after`` estimated tokens, kept
+steps) and the context the last request was sent with.
 """
 from __future__ import annotations
 
@@ -61,7 +70,8 @@ def load_session(path: Path) -> tuple[str, str, list[Message]]:
     return system, user, msgs
 
 
-def synthetic(steps: int = 60, seed: int = 7) -> tuple[str, str, list[Message]]:
+def synthetic(steps: int = 60, seed: int = 7, *, big_writes: int = 0, burst: int = 0,
+              big_chars: int = 50_000) -> tuple[str, str, list[Message]]:
     """A build-and-debug session shaped like Terminal-Bench build-cython-ext:
     ~60 steps, tool results of 0.2-7 KB, a few long file writes, ~850 chars of
     reasoning per step."""
@@ -84,6 +94,22 @@ def synthetic(steps: int = 60, seed: int = 7) -> tuple[str, str, list[Message]]:
         body = text(size)
         msgs.append(Message.tool(cid, f'<tool-output tool="{name}" trust="untrusted">\nexit code 0\n{body}\n'
                                  '</tool-output>'))
+    def big_file(i: int) -> str:
+        return "".join(f"# f{i} line {n:05d} " + text(60) + "\n" for n in range(big_chars // 70))[:big_chars]
+    for i in range(big_writes):
+        cid = f"big_{i:02d}"
+        msgs.append(Message.assistant(None, reasoning=text(600),
+                                      tool_calls=[_tc(cid, "fs.write", {"path": f"/app/gen{i}.py", "content": big_file(i)})]))
+        msgs.append(Message.tool(cid, f"wrote /app/gen{i}.py ({big_chars} chars)"))
+    if burst:
+        ids = [f"burst_{i:02d}" for i in range(burst)]
+        msgs.append(Message.assistant(None, reasoning=text(600), tool_calls=[
+            _tc(cid, "fs.write", {"path": f"/app/b{i}.py", "content": big_file(100 + i)}) for i, cid in enumerate(ids)]))
+        msgs += [Message.tool(cid, f"wrote /app/b{i}.py ({big_chars} chars)") for i, cid in enumerate(ids)]
+    for i in range(3 if big_writes or burst else 0):           # a few small steps after the writes
+        cid = f"after_{i}"
+        msgs.append(Message.assistant(None, reasoning=text(400), tool_calls=[_tc(cid, "shell.run", {"command": "pytest -q"})]))
+        msgs.append(Message.tool(cid, "exit code 0\n3 passed"))
     msgs.append(Message.assistant("Done: the extension builds and the tests pass.", reasoning=text(400)))
     return "You are a coding agent in a container.", "Build the Cython extensions and verify.", msgs
 
@@ -126,14 +152,23 @@ class ReplayProvider(FakeProvider):
         return super()._next(req)
 
 
-async def replay(system: str, user: str, msgs: list[Message], trigger: int) -> dict[str, Any]:
+async def replay(system: str, user: str, msgs: list[Message], trigger: int, window: int = 0) -> dict[str, Any]:
     steps, results, names = script_and_tools(msgs)
     prov = ReplayProvider(steps)
     from dataclasses import replace
+    if window:
+        prov._caps = replace(prov._caps, context=window, soft_context=min(prov._caps.soft_context, window))
     if trigger < 0:      # never: a trigger above the whole window
         prov._caps = replace(prov._caps, soft_context=10**9, context=10**9)
     elif trigger:
         prov._caps = replace(prov._caps, soft_context=int(trigger / AgentPreset().compact_at))
+    compactions_seen: list[str] = []
+
+    def sink(ev: Any) -> None:
+        if ev.kind == "notice" and "compacted context" in ev.text:
+            d = ev.data
+            compactions_seen.append(f"{d.get('parts')}:{d.get('before')}->{d.get('after')}"
+                                    + (f"/k{d.get('kept_steps')}" if d.get("kept_steps") else ""))
 
     @ventri.plugin(name="provider:replay", provides={"llm": ModelProvider})
     def provider(ctx: Any, config: Any) -> None:
@@ -161,13 +196,14 @@ async def replay(system: str, user: str, msgs: list[Message], trigger: int) -> d
                 "agents": {"replay": {"system_prompt": system, "time_notes": False}}})
             mgr = k.get(SessionManager)
             s = await mgr.open(agent="replay")
-            r = await s.turn(user)
+            r = await s.turn(user, sink)
             usage = Usage()
-            peak_ctx = 0
+            peak_ctx = last_ctx = 0
             for u, summary in _usages(Path(tmp), s.id):
                 usage = usage + u
                 if not summary:
                     peak_ctx = max(peak_ctx, u.prompt_tokens)
+                    last_ctx = u.prompt_tokens
             money = prov.prices.price(usage, PEAK, "deepseek-flash")
             compactions = sum(1 for line in (Path(tmp) / f"{s.id}.jsonl").read_text().splitlines()
                               if '"t": "compact"' in line)
@@ -175,7 +211,9 @@ async def replay(system: str, user: str, msgs: list[Message], trigger: int) -> d
     return {"trigger": trigger, "status": r.status, "steps": len(prov.requests) - prov.summary_calls,
             "prompt_tokens": usage.prompt_tokens, "cache_hit": usage.cache_hit, "cache_miss": usage.cache_miss,
             "hit_rate": round(usage.hit_rate, 4), "max_context": peak_ctx, "compactions": compactions,
-            "cost_usd": round(money.usd, 5)}
+            "cost_usd": round(money.usd, 5), "last_context": last_ctx,
+            "trigger_tokens": int(prov._caps.soft_context * AgentPreset().compact_at),
+            "compaction_log": compactions_seen, "error": r.reason if r.status == "error" else ""}
 
 
 def _usages(d: Path, sid: str) -> list[tuple[Usage, bool]]:
@@ -193,24 +231,31 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--trigger", type=int, nargs="*", default=[24_000, 32_000, 48_000])
     ap.add_argument("--steps", type=int, default=60, help="synthetic session length")
+    ap.add_argument("--big-writes", type=int, default=0, help="synthetic: K trailing steps each writing a big file")
+    ap.add_argument("--burst", type=int, default=0, help="synthetic: one step with K big parallel writes")
+    ap.add_argument("--big-chars", type=int, default=50_000)
+    ap.add_argument("--window", type=int, default=0, help="model context window (default: the fake model's 1M)")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     if a.session is None and not a.synthetic:
         ap.error("give a session log or --synthetic")
-    system, user, msgs = synthetic(a.steps) if a.session is None else load_session(a.session)
-    rows = [anyio.run(replay, system, user, msgs, t, backend="asyncio") for t in [-1, 0, *a.trigger]]
+    system, user, msgs = (synthetic(a.steps, big_writes=a.big_writes, burst=a.burst, big_chars=a.big_chars)
+                          if a.session is None else load_session(a.session))
+    rows = [anyio.run(replay, system, user, msgs, t, a.window, backend="asyncio") for t in [-1, 0, *a.trigger]]
     if a.json:
         print(json.dumps(rows, indent=2))
         return 0
     base = rows[0]
     print(f"{'trigger':>9} {'status':>7} {'steps':>5} {'prompt':>10} {'vs never':>7} {'hit':>6} {'miss':>9} "
-          f"{'max ctx':>8} {'compact':>7} {'cost $':>8}")
+          f"{'max ctx':>8} {'last ctx':>8} {'compact':>7} {'cost $':>8}  compactions (estimated before->after)")
     for r in rows:
         rel = r["prompt_tokens"] / base["prompt_tokens"] - 1 if base["prompt_tokens"] else 0
         label = {-1: "never", 0: "default"}.get(r["trigger"], r["trigger"])
         print(f"{label:>9} {r['status']:>7} {r['steps']:>5} {r['prompt_tokens']:>10} {rel:>+9.0%} "
-              f"{r['hit_rate']:>6.1%} {r['cache_miss']:>9} {r['max_context']:>8} {r['compactions']:>7} "
-              f"{r['cost_usd']:>8.4f}")
+              f"{r['hit_rate']:>6.1%} {r['cache_miss']:>9} {r['max_context']:>8} {r['last_context']:>8} "
+              f"{r['compactions']:>7} {r['cost_usd']:>8.4f}  {' '.join(r['compaction_log'])}")
+        if r["error"]:
+            print(f"{'':>9} error: {r['error']}")
     return 0
 
 
