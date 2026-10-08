@@ -122,6 +122,7 @@ class Fiber:
         self.error: BaseException | None = None
         self.pending_reason: str | None = None
         self.meta: dict = meta or {}
+        self._path: str | None = None
         self.children: list[Fiber] = []
         self.ctx: Context = ctx if ctx is not None else Context(kernel, self)
         # scopes: a scope fiber owns a realm for the keys it isolates and bounds events
@@ -172,6 +173,16 @@ class Fiber:
     @property
     def label(self) -> str:
         return f"{self.name}#{self.id}"
+
+    @property
+    def path(self) -> str:
+        """``root/<seg>/...``: one segment per fiber -- its config id (``meta["id"]``)
+        if set, else its name. Used as the trace ``fiber`` field."""
+        p = self._path
+        if p is None:
+            seg = str(self.meta.get("id") or self.name)
+            p = self._path = seg if self.parent is None else f"{self.parent.path}/{seg}"
+        return p
 
     @property
     def inject(self) -> tuple:

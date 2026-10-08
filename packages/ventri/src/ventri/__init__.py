@@ -20,11 +20,14 @@ from .kernel import Binding, Kernel, Realm, TraceEvent
 from .plugin import Retry, plugin
 from .report import TxReport
 from .secret import Secret, redact
+from .trace import KERNEL_KINDS, SCHEMA_VERSION
 from .transaction import Transaction
 
 __version__ = "0.2.0a1"
 
 __all__ = [
+    "KERNEL_KINDS",
+    "SCHEMA_VERSION",
     "Binding",
     "Context",
     "Deny",

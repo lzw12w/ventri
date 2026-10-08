@@ -12,6 +12,7 @@ from .errors import ServiceConflict, ServiceNotFound
 from .events import Deny, Event, Rewrite, event_name
 from .fiber import LIVE, maybe_await
 from .plugin import MISSING, keyname
+from .trace import KERNEL_KINDS
 
 if TYPE_CHECKING:  # pragma: no cover
     from .fiber import Fiber, TaskHandle
@@ -307,6 +308,14 @@ class Context:
             await maybe_await(lst.fn(*args))
         except Exception as e:  # noqa: BLE001 - listener errors are isolated by contract
             self.kernel._trace("event.error", lst.fiber, event=event, error=repr(e))
+
+    # ------------------------------------------------------------- tracing
+    def trace(self, kind: str, **attrs: Any) -> None:
+        """Emit a custom trace event attributed to this fiber (dotted ``kind``, not a
+        kernel kind). Exported with schema v1 like kernel events."""
+        if "." not in kind or kind in KERNEL_KINDS:
+            raise ValueError(f"invalid custom trace kind {kind!r} (dotted, not a kernel kind)")
+        self.kernel._trace(kind, self.fiber, **attrs)
 
     # ----------------------------------------------------------- transactions
     def transaction(self, *, wait: bool = True, strict: bool = False,

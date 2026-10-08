@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lzw12w/ventri/docs/trace-schema-v1.json",
+  "title": "Ventri trace record, schema v1",
+  "type": "object",
+  "required": ["v", "seq", "ts", "kind", "fiber", "scope", "tx", "attrs"],
+  "properties": {
+    "v": {"const": 1},
+    "seq": {"type": "integer", "minimum": 1},
+    "ts": {"type": "number", "description": "Unix epoch seconds (UTC)"},
+    "kind": {"type": "string", "pattern": "^[^.]+\\..+$"},
+    "fiber": {"type": ["string", "null"], "description": "root/<id-or-name>/..."},
+    "scope": {"type": ["string", "null"]},
+    "tx": {"type": ["integer", "null"]},
+    "attrs": {"type": "object"}
+  },
+  "additionalProperties": true
+}

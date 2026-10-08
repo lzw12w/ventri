@@ -16,6 +16,8 @@ from .diagnose import diagnose
 from .errors import KernelError
 from .fiber import LIVE, Fiber, State, task_local
 from .plugin import Retry, keyname
+from .secret import redact
+from .trace import SCHEMA_VERSION
 
 if TYPE_CHECKING:  # pragma: no cover
     from .transaction import Transaction
@@ -56,14 +58,33 @@ class Listener:
 
 @dataclass
 class TraceEvent:
-    """One trace record. ``fiber`` is the fiber label (``name#id``); :meth:`to_dict`
-    produces the versioned, exportable form (see ``ventri.trace``)."""
+    """One trace record (in memory). ``fiber`` is the fiber label (``name#id``),
+    ``path`` its id/name path, ``data`` the attrs. :meth:`to_dict` is the
+    versioned export form (schema v1, see ``ventri.trace``)."""
 
     seq: int
     time: float
     kind: str
     fiber: str | None
     data: dict = field(default_factory=dict)
+    path: str | None = None
+    scope: str | None = None
+    tx: int | None = None
+
+    @property
+    def ts(self) -> float:
+        return self.time
+
+    @property
+    def attrs(self) -> dict:
+        return self.data
+
+    def to_dict(self) -> dict[str, Any]:
+        attrs = redact(self.data)
+        if self.fiber is not None:
+            attrs = {"label": self.fiber, **attrs}
+        return {"v": SCHEMA_VERSION, "seq": self.seq, "ts": self.time, "kind": self.kind,
+                "fiber": self.path, "scope": self.scope, "tx": self.tx, "attrs": attrs}
 
     def __str__(self) -> str:
         extra = " ".join(f"{k}={v}" for k, v in self.data.items())
@@ -111,6 +132,7 @@ class Kernel(Context):
             while root._effects:
                 await root._run_effect(root._effects.pop())
         root._set_state(State.DISPOSED)
+        self._trace("kernel.stop")
         self._tg.cancel_scope.cancel()
         assert self._stack is not None
         return await self._stack.__aexit__(*exc)  # type: ignore[arg-type]
@@ -127,7 +149,18 @@ class Kernel(Context):
         return lambda: self._tracers.remove(callback) if callback in self._tracers else None
 
     def _trace(self, kind: str, fiber: Fiber | None = None, **data: Any) -> None:
-        ev = TraceEvent(next(self._seq), time.time(), kind, fiber.label if fiber else None, data)
+        txid = data.get("tx")
+        if fiber is None:
+            path = scope = None
+        else:
+            path = fiber.path
+            sf = fiber.scope_fiber
+            scope = sf.name if sf.parent is not None else None
+            if not isinstance(txid, int):
+                t = fiber.tx
+                txid = t.id if t is not None else None
+        ev = TraceEvent(next(self._seq), time.time(), kind, fiber.label if fiber else None, data,
+                        path, scope, txid if isinstance(txid, int) else None)
         self.trace_log.append(ev)
         for cb in list(self._tracers):
             try:
