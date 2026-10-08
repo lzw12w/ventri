@@ -88,7 +88,8 @@ async def test_shell_large_output_head_tail_artifact(tmp_path, monkeypatch):
 async def test_shell_chinese_output_budgeted(tmp_path, monkeypatch):
     monkeypatch.setenv("VENTRI_HOME", str(tmp_path / "home"))
     t = tool(tmp_path)
-    out = await run(t, {"command": "for i in $(seq 1 2000); do echo \"第$i行 中文输出内容\"; done"}, tmp_path)
+    # ${i}: a C-locale /bin/sh (macOS CI) would read the UTF-8 bytes after $i as part of the name
+    out = await run(t, {"command": "for i in $(seq 1 2000); do echo \"第${i}行 中文输出内容\"; done"}, tmp_path)
     # ~33K chars: the old 20K-char cut would have let ~20K Chinese chars (~12K tokens) through
     assert estimate_tokens(out) < 8000 and "第2000行" in out and "artifact" in out
 
