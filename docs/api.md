@@ -149,7 +149,7 @@ Alpha: public but may still change within 0.2.x. Design: DESIGN.md section 5 and
 | `ventri_agent.permission` | `Policy`, `ApprovalBroker`, `AuditLog` | `rules: [{tool, action, risk?, when?, origin?, agent?, session?}]`, `approval_timeout=120`, `audit` |
 | `ventri_agent.memory` | `LongTermMemory` | `path` (`~/.ventri/memory.db`, or `:memory:`) |
 | `ventri_agent.sessions` | `SessionManager` | `dir`, `idle_timeout=1800`, `retention_days=7`, `budget`, `agents`, `extract_memory=true`, `sweep_interval` |
-| `ventri_agent.tools.core` / `.fs` / `.shell` / `.web` / `.notes` / `.memory` / `.inspect` | tools | fs: `roots`, `write`; shell: `cwd`, `policy`, `timeout`, `max_output`; web: `allow_domains`, `timeout`, `max_bytes`; notes: `vault`, `write` |
+| `ventri_agent.tools.core` / `.fs` / `.shell` / `.web` / `.notes` / `.memory` / `.inspect` | tools | fs: `roots`, `write` (file behaviour adapted from Hermes Agent, see THIRD_PARTY_NOTICES.md); shell: `cwd`, `policy`, `timeout`, `max_output`; web: `allow_domains`, `timeout`, `max_bytes`; notes: `vault`, `write` |
 | `ventri_agent.channels.cli` | `CliChannel` | `session`, `agent`, `resume_last`, `show_thinking` (exclusive; reads an optional `"cli.terminal"` service) |
 
 Session-scope plugins loaded by `SessionManager.open` (not used directly in `ventri.yml`):

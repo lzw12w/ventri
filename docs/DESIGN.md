@@ -938,6 +938,13 @@ gantt
 8. **记忆抽取时机**：会话结束（`/end`、`/exit`、EOF、7 天保留期扫除）时用 cheap 路由 + JSON 输出抽取一次；敏感项 `pending`，`/memory pending` / `va memory confirm` 确认。
 9. **测试与评测**：默认测试全部离线（httpx `MockTransport` + 脚本化假模型；假模型模拟 DeepSeek 前缀单元缓存）；`-m live` 契约测试仅在设置 `DEEPSEEK_API_KEY` 时运行，并加了夜间 CI 工作流（北京时间 01:30 谷时）。30 个个人任务评测在 `evals/agent/`。
 10. **不在 M2**：MCP 桥（M3，因此未加 `mcp` 依赖，退出标准中的“MCP 断开”一项随 M3 验收）、图片输入与视觉路由、FIM / 对话前缀续写、Responses 格式、OTel；`va serve/propose/history/rollback` 保留并以退出码 2 提示。PyPI 未发布（需要 Jeff 操作）。
+11. **文件工具改用 Hermes Agent 的实现（2026-10-08）**：`fs.*` / `notes.*` 的行为移植自 Hermes Agent（MIT，`tools/_hermes_fs/`，许可见仓库根 `THIRD_PARTY_NOTICES.md`），Ventri 的架构不变——仍是 `tool:fs` 插件（`roots`、`write: ask|allow|deny`）、roots 内路径限定（解析符号链接，越界即拒绝）、风险/subject/默认动作元数据、不可信输出围栏、strict schema。没有移植 Hermes 的审批/敏感路径模型和终端后端。
+    - 参数变化：`fs.read` 按**行**分页（`offset` 从 1 开始、`limit` ≤ 2000），输出 `行号|内容`，单次约 30K 字符预算（低于 32K 的 artifact 阈值）并给出 `offset=` 续读；`fs.edit` 改为 `old_string/new_string/replace_all`，另有 `edits=[...]` 对同一文件原子地做多处替换（替代 Hermes 的 V4A 多文件补丁：OpenAI 专用格式，且删除/移动无法映射到逐路径的权限 subject）；`fs.search` 改为 Hermes 参数（`pattern`、`target=content|files`、`file_glob`、`output_mode`、`context`、`limit/offset`、`order`），另加 `ignore_case`、`literal`；`fs.write` 保留 `create|overwrite|append`；`notes.read` 加 `offset/limit`，`notes.search` 加 `limit/offset`。没有新增工具（不加 `notes.edit`：现有审批/评测清单不认识它，`fs.edit` 可编辑 roots 内的笔记）。
+    - 编辑：9 级模糊匹配、多处匹配列出行号、已应用检测（不写盘）、统一 diff、CRLF/BOM 保留、非 UTF-8 字节用 surrogateescape 原样保留（修复旧实现 `decode(replace)` 写回损坏）、原子写（同目录临时文件 + fsync + `os.replace`，保留权限位）+ 写后 sha256 校验、JSON/YAML/TOML 语法错误拒写、`.py` 等语法检查只报告新增错误。失败详情中引用的文件内容作为 `ToolError(untrusted=...)` 由循环围栏为不可信数据。
+    - 读前写/陈旧检测：`FileState` 是**会话级服务**（`session-core` 提供、列入 `SESSION_KEYS`，scope 释放时清除该会话状态；“最后写入者”表进程级共享，用于发现其他会话的写入）。`overwrite` 仅在本会话持有文件完整当前内容（整读/分页读完/自己写入，且之后未变）时允许，否则拒绝且不动文件；`fs.edit` 只警告（它会重读并以 old_string 定位）。含不可解码字节的读取不算完整读取。会话恢复（重启）后状态为空，需要重新读取。
+    - 读取保护：设备/`/proc` 路径、FIFO/套接字等特殊文件、二进制（魔数识别类型）、UTF-16 转码、相似文件名提示、超长行截断、合并冲突标记提示。搜索：ripgrep（`--no-config`、不跟随符号链接）+ 纯 Python 回退（CI 无 rg 时），零结果时给大小写/隐藏文件/正则元字符提示，逗号分隔多路径。
+    - 所有文件操作经 `anyio.to_thread` 在线程中执行（读可在超时时放弃，写总会完成），不再阻塞事件循环，`timeout` 与并行只读工具因此生效。
+    - 未移植：读取去重/连续读阻断（需要压缩钩子）、密钥脱敏与凭据黑名单（以 roots 限定代替）、文档抽取（PDF/Office，需额外依赖）、LSP 与外部 linter、V4A、Hermes 审批/受保护路径/镜像守卫。
 
 **退出标准当前状态（2026-10-08）**：缓存命中——真实 API 6 轮会话 74.8%（假模型模拟 8 轮 94.8%），`va cost` 每日报表已有；红队——15 个用例（8 种注入载荷 × 拒绝、无渠道、围栏逃逸、授权越级、改写诱导、模型文本冒充批准）零未批准动作（离线、模型“完全服从”的最坏情况）；工具崩溃/模型 5xx/进程重启——测试覆盖，会话不丢且可恢复（MCP 部分随 M3）；个人评测集——30 个任务首次真实运行 29/30（96.7%），修正后复跑失败项通过；契约测试——已全部通过一次，“连续 7 天”需夜间工作流运行（需要仓库 secret）；Jeff 两周自用——未开始。
 
