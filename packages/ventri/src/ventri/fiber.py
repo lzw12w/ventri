@@ -160,7 +160,6 @@ class Fiber:
         self._load_scope: anyio.CancelScope | None = None
         self._dispose_requested = False
         self._tg: Any = None
-        self._stop: anyio.Event | None = None
         self._closed: anyio.Event | None = None
         if parent is not None:
             parent.children.append(self)
@@ -274,7 +273,7 @@ class Fiber:
 
     # ------------------------------------------------------- task group host
     async def _open_scope(self) -> None:
-        stop, closed = anyio.Event(), anyio.Event()
+        closed = anyio.Event()
 
         async def host(*, task_status: Any = anyio.TASK_STATUS_IGNORED) -> None:
             tg_ref = None
@@ -282,23 +281,23 @@ class Fiber:
                 async with anyio.create_task_group() as tg:
                     tg_ref = self._tg = tg
                     task_status.started()
-                    await stop.wait()
-                    tg.cancel_scope.cancel()
+                    await anyio.sleep_forever()  # until _close_scope cancels the group
             finally:
                 if self._tg is tg_ref:
                     self._tg = None
                 closed.set()
 
-        self._stop, self._closed = stop, closed
+        self._closed = closed
         assert self.parent is not None and self.parent._tg is not None
         await self.parent._tg.start(host, name=f"fiber:{self.label}")
 
     async def _close_scope(self) -> None:
-        stop, closed = self._stop, self._closed
-        if stop is None or closed is None:
+        closed = self._closed
+        if closed is None:
             return
-        self._stop = self._closed = None
-        stop.set()
+        self._closed = None
+        if self._tg is not None:
+            self._tg.cancel_scope.cancel()
         # A task inside this fiber's own task group cannot wait for that group to exit.
         if self._tg is not None and not self.kernel._inside(self):
             await closed.wait()
