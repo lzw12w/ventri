@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 import ventri
 from ventri import Fiber, State
 
-from .context import ContextBuilder, context_builder
+from .context import ARGS_MIN_TOKENS, ARGS_TOKENS, ContextBuilder, context_builder
 from .loop import AgentLoop, Sink, TurnResult, agent_loop
 from .memory import LongTermMemory, MemoryItem, WorkingMemory
 from .paths import expand
@@ -193,11 +193,15 @@ class SessionManager:
                                     inline_tokens=int(spec.get("inline_tokens", 8_000)),
                                     compact_at=float(spec.get("compact_at", 0.6)),
                                     compact_keep_turns=int(spec.get("compact_keep_turns", 4)),
-                                    compact_keep_steps=int(spec.get("compact_keep_steps", 6)))
+                                    compact_keep_steps=int(spec.get("compact_keep_steps", 6)),
+                                    compact_args_tokens=int(spec.get("compact_args_tokens", ARGS_TOKENS)))
             p = out[name]
             if not 0.1 <= p.compact_at <= 0.95 or p.compact_keep_turns < 1 or p.compact_keep_steps < 1:
                 raise SessionError(f"agent preset {name!r}: compact_at must be in [0.1, 0.95] and "
                                    "compact_keep_turns / compact_keep_steps >= 1")
+            if p.compact_args_tokens and p.compact_args_tokens < ARGS_MIN_TOKENS:
+                raise SessionError(f"agent preset {name!r}: compact_args_tokens must be 0 (off) or "
+                                   f">= {ARGS_MIN_TOKENS}")
         return out
 
     # --------------------------------------------------------------- open

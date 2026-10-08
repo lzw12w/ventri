@@ -477,17 +477,20 @@ class AgentLoop:
             await _emit(sink, TurnEvent("error", self.info.id, f"compaction failed: {e}"))
             return False
         steps = sum(1 for m in h[plan.span[0]:plan.span[1]] if m.role == "assistant") if plan.span else 0
-        b.apply_compaction(plan.drop, summary, span=plan.span, progress=progress, steps=steps, trims=plan.trims)
+        b.apply_compaction(plan.drop, summary, span=plan.span, progress=progress, steps=steps, trims=plan.trims,
+                           args=plan.args)
         b.new_epoch()  # compaction is also the point where a new tool set takes effect
         self.last_prompt_tokens = 0
         after = b.estimate_tokens()
+        n_args = sum(len(c) for _, c in plan.args)
         info = {"parts": plan.kind, "dropped": plan.drop, "steps": steps, "kept_steps": plan.kept_steps if plan.span else 0,
-                "trimmed": len(plan.trims), "before": plan.before, "after": after}
+                "trimmed": len(plan.trims), "args": n_args, "before": plan.before, "after": after}
         self.ctx.trace("context.compact", session=self.info.id, forced=force,
                        ms=round((time.monotonic() - t0) * 1000), **info)
         parts = ([f"{plan.drop} earlier messages"] if plan.drop else []) + \
             ([f"{steps} earlier steps of this turn (kept the last {plan.kept_steps})"] if plan.span else []) + \
-            ([f"trimmed {len(plan.trims)} large results"] if plan.trims else [])
+            ([f"trimmed {len(plan.trims)} large results"] if plan.trims else []) + \
+            ([f"shortened the arguments of {n_args} large tool calls"] if n_args else [])
         await _emit(sink, TurnEvent("notice", self.info.id, f"compacted context: {'; '.join(parts)} "
                                     f"(~{plan.before} -> ~{after} tokens)", info))
         return True

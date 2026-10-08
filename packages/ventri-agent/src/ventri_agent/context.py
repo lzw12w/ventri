@@ -21,19 +21,24 @@ rolling truncation. It summarises, with the cheap route, the turns before the
 last ``compact_keep_turns`` user turns; when that is not enough -- a single long
 agentic turn -- it also summarises the earlier steps of the current turn into
 a structured progress note, keeping the user's message verbatim and the last
-``compact_keep_steps`` model steps intact (see :meth:`compaction_plan`). Each
-compaction is one ``compact`` record, re-applied on replay.
+``compact_keep_steps`` model steps intact (see :meth:`compaction_plan`). On
+the same occasion, string values above ``compact_args_tokens`` in the
+*retained* tool-call arguments (a big ``fs.write`` content, a long heredoc) are
+shortened to head + tail with the full value in an artifact (see
+:func:`shrink_arguments`) -- only then, never on a normal step, so the prefix
+cache is untouched in between. Each compaction is one ``compact`` record
+holding the resulting texts, re-applied on replay.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .memory import LongTermMemory
-from .messages import ChatRequest, Message
+from .messages import ChatRequest, Message, ToolCall
 from .paths import expand
 from .providers.base import ModelProvider, Route
 from .session import Replay, SessionInfo, SessionLog, apply_compact
@@ -93,6 +98,8 @@ TRIM_MIN_TOKENS = 2_000      # kept tool results above this may be trimmed as a 
 TRIM_PREVIEW_TOKENS = 600
 TRANSCRIPT_CHARS = 150_000   # summariser input cap
 ARTIFACT_INDEX_CHARS = 4_000 # compacted tool results this long get an artifact pointer
+ARGS_TOKENS = 4_000          # default ``compact_args_tokens``: per string value of retained tool-call arguments
+ARGS_MIN_TOKENS = 1_000      # lowest accepted setting (> preview + marker: a shortened value is never re-shortened)
 
 
 @dataclass
@@ -316,6 +323,10 @@ class ContextBuilder:
                         force: bool = False) -> CompactionPlan | None:
         """Choose what to summarise so the context gets below ``goal`` tokens.
 
+        0. always: in every retained assistant message, tool-call argument
+           strings above ``compact_args_tokens`` become head + tail with the
+           full value in an artifact (counted before anything is summarised,
+           so it can make summarising unnecessary);
         1. cross-turn: everything before the last ``keep_turns`` user turns;
         2. if that is not enough (or nothing older exists and ``force``): the
            earlier steps of the current turn, between the user message (kept
@@ -324,8 +335,9 @@ class ContextBuilder:
            assistant messages keep their ``reasoning_content``); fewer kept
            steps (down to 1) if needed;
         3. still too big: all earlier turns;
-        4. still too big: oversized kept tool results become head + tail with
-           the full text in an artifact.
+        4. still too big: the largest remaining items of the kept steps, tool
+           results above ``TRIM_MIN_TOKENS`` and tool calls with argument
+           strings above it, become head + tail (biggest saving first).
 
         Returns None when there is nothing to compact."""
         h = self.history
@@ -335,9 +347,17 @@ class ContextBuilder:
         tok = [_msg_tokens(m) for m in h]
         base = self._base_tokens()
         before = base + sum(tok)
+        args_budget = self.info.agent.compact_args_tokens
+        shrunk: dict[int, _Shrunk] = {}          # step 0, by history index
+        if args_budget:
+            for i, m in enumerate(h):
+                if s := self._shrink_calls(m, args_budget):
+                    shrunk[i] = s
+        argsave = {i: tok[i] - s.tokens for i, s in shrunk.items()}
 
         def size(drop: int, span: tuple[int, int] | None, saved: int = 0) -> int:
             n = base + sum(tok[drop:]) + (SUMMARY_TOKENS if drop else 0) - saved
+            n -= sum(v for i, v in argsave.items() if i >= drop and not (span and span[0] <= i < span[1]))
             if span:
                 n += SUMMARY_TOKENS - sum(tok[span[0]:span[1]])
             return n
@@ -347,6 +367,7 @@ class ContextBuilder:
         span: tuple[int, int] | None = None
         kept = 0
         trims: list[tuple[int, str]] = []
+        saved = 0
         if size(drop, None) > goal or (force and drop == 0):
             steps = [i for i in range(u + 1, len(h)) if h[i].role == "assistant"]
             for k in range(min(keep_steps, len(steps) - 1), 0, -1):
@@ -356,31 +377,64 @@ class ContextBuilder:
             if size(drop, span) > goal and len(users) > 1 and drop < u:
                 drop = u
             if size(drop, span) > goal:
-                saved = 0
                 start = span[1] if span else u + 1
-                big = sorted((i for i in range(start, len(h)) if h[i].role == "tool" and tok[i] > TRIM_MIN_TOKENS
-                              and h[i].meta.get("seq") is not None), key=lambda i: -tok[i])
-                for i in big:
-                    trims.append((i, self._trimmed(h[i])))
-                    saved += tok[i] - _msg_tokens(replace(h[i], content=trims[-1][1]))
+                cands: list[tuple[int, int, str | _Shrunk]] = []    # (saving, index, new content | calls)
+                trim_args = min(TRIM_MIN_TOKENS, args_budget or TRIM_MIN_TOKENS)
+                for i in range(start, len(h)):
+                    m = h[i]
+                    if m.meta.get("seq") is None:
+                        continue
+                    if m.role == "tool" and tok[i] > TRIM_MIN_TOKENS:
+                        c = self._trimmed(m, save=False)
+                        cands.append((tok[i] - _msg_tokens(replace(m, content=c)), i, c))
+                    elif (s := self._shrink_calls(m, trim_args)) and s.tokens < tok[i] - argsave.get(i, 0):
+                        cands.append((tok[i] - argsave.get(i, 0) - s.tokens, i, s))
+                for gain, i, new in sorted(cands, key=lambda c: (-c[0], c[1])):
+                    if isinstance(new, str):
+                        trims.append((i, self._trimmed(h[i])))      # same text, now with its artifact
+                    else:
+                        shrunk[i] = new
+                    saved += gain
                     if size(drop, span, saved) <= goal:
                         break
-        if drop == 0 and span is None and not trims:
+        args = sorted(i for i in shrunk if i >= drop and not (span and span[0] <= i < span[1]))
+        if drop == 0 and span is None and not trims and not args:
             return None
-        saved = sum(tok[i] - _msg_tokens(replace(h[i], content=c)) for i, c in trims)
+        for i in args:
+            for handle, text in shrunk[i].artifacts:
+                self.save_artifact(handle, text)
         return CompactionPlan(drop, span, kept, [(int(h[i].meta["seq"]), c) for i, c in trims],
-                              before, size(drop, span, saved), u)
+                              before, size(drop, span, saved), u,
+                              [(int(h[i].meta["seq"]), shrunk[i].calls) for i in args])
 
-    def _trimmed(self, m: Message) -> str:
+    def _shrink_calls(self, m: Message, budget: int) -> _Shrunk | None:
+        """``m``'s tool calls with oversized argument strings shortened (None:
+        nothing to shorten). Artifacts are only listed, written by the plan."""
+        if m.role != "assistant" or not m.tool_calls or m.meta.get("seq") is None:
+            return None
+        calls: dict[str, str] = {}
+        arts: list[tuple[str, str]] = []
+        for tc in m.tool_calls:
+            new, a = shrink_arguments(tc.id, tc.arguments, budget)
+            if a:
+                calls[tc.id] = new
+                arts += a
+        if not calls:
+            return None
+        tcs = [ToolCall(tc.id, tc.name, calls.get(tc.id, tc.arguments)) for tc in m.tool_calls]
+        return _Shrunk(calls, arts, _msg_tokens(replace(m, tool_calls=tcs)))
+
+    def _trimmed(self, m: Message, *, save: bool = True) -> str:
         content = m.content or ""
         ref = re.search(r"is artifact '([A-Za-z0-9_.\-]+)'", content)
-        handle = ref.group(1) if ref else self.save_artifact(f"{m.tool_call_id or 'seq'}-full", content)
+        name = f"{m.tool_call_id or 'seq'}-full"
+        handle = ref.group(1) if ref else self.save_artifact(name, content) if save else _artifact_name(name)
         head, tail, omitted = head_tail(content, TRIM_PREVIEW_TOKENS)
         return (f"{head}\n\n[... {omitted} chars trimmed when the context was compacted; the full result is "
                 f"artifact {handle!r}: artifact.read(handle={handle!r}) ...]\n\n{tail}")
 
     def save_artifact(self, name: str, text: str) -> str:
-        handle = re.sub(r"[^A-Za-z0-9_\-.]", "_", name)
+        handle = _artifact_name(name)
         d = self.info.dir / "artifacts"
         d.mkdir(parents=True, exist_ok=True)
         p = d / f"{handle}.txt"
@@ -389,14 +443,18 @@ class ContextBuilder:
         return handle
 
     def apply_compaction(self, drop: int, summary: str, *, span: tuple[int, int] | None = None,
-                         progress: str = "", steps: int = 0, trims: list[tuple[int, str]] | None = None) -> None:
+                         progress: str = "", steps: int = 0, trims: list[tuple[int, str]] | None = None,
+                         args: list[tuple[int, dict[str, str]]] | None = None) -> None:
         """Log one ``compact`` record and apply it (``span`` in absolute history
-        indices; logged relative to the remaining history)."""
+        indices; logged relative to the remaining history). ``args`` holds the
+        shortened argument texts themselves, so replay needs no recomputation."""
         rec: dict[str, Any] = {"drop": drop, "summary": summary}
         if span:
             rec.update(span=[span[0] - drop, span[1] - drop], progress=progress, steps=steps)
         if trims:
             rec["trim"] = [{"seq": seq, "content": c} for seq, c in trims]
+        if args:
+            rec["args"] = [{"seq": seq, "calls": calls} for seq, calls in args]
         self.log.append("compact", **rec)
         self.history = apply_compact(self.history, rec)
         self.compact_floor = self.estimate_tokens()
@@ -411,11 +469,102 @@ class CompactionPlan:
     before: int
     after: int                        # projected size (summaries counted as SUMMARY_TOKENS each)
     user: int                         # index of the current turn's user message
+    args: list[tuple[int, dict[str, str]]] = field(default_factory=list)  # (seq, {call id: shortened arguments})
 
     @property
     def kind(self) -> str:
-        parts = (["turns"] if self.drop else []) + (["steps"] if self.span else []) + (["trim"] if self.trims else [])
+        parts = (["turns"] if self.drop else []) + (["steps"] if self.span else []) + \
+            (["trim"] if self.trims else []) + (["args"] if self.args else [])
         return "+".join(parts)
+
+
+@dataclass
+class _Shrunk:
+    calls: dict[str, str]             # call id -> shortened arguments text
+    artifacts: list[tuple[str, str]]  # (handle, full original value)
+    tokens: int                       # estimated size of the message with them
+
+
+def shrink_arguments(call_id: str, arguments: str, budget: int,
+                     preview: int = TRIM_PREVIEW_TOKENS) -> tuple[str, list[tuple[str, str]]]:
+    """Shorten the oversized values of one tool call's JSON ``arguments``.
+
+    Every string value (at any depth) estimated above ``budget`` tokens becomes
+    head + tail (``preview`` tokens) around a marker naming the artifact that
+    holds the full value; an array still above ``budget`` after that keeps its
+    first and last items around a marker item. Keys, nesting and value types
+    stay as they were and the result is valid JSON (re-serialised only when
+    something changed). Arguments that are not valid JSON (the call already
+    failed) are shortened as plain text. Pure: returns ``(new arguments,
+    [(artifact handle, full text)])``, with no artifacts when nothing changed.
+    Handles are ``<call id>-args-<key path>``, so they are deterministic."""
+    if estimate_tokens(arguments) <= budget:
+        return arguments, []
+    prefix = _safe_handle(f"{call_id or 'call'}-args")
+    arts: list[tuple[str, str]] = []
+    used: set[str] = set()
+
+    def handle(path: str) -> str:
+        h = _safe_handle(f"{prefix}-{path or 'value'}")[:120]
+        n, out = 2, h
+        while out in used:
+            out, n = f"{h}-{n}", n + 1
+        used.add(out)
+        return out
+
+    def cut(text: str, path: str) -> str:
+        h = handle(path)
+        arts.append((h, text))
+        head, tail, omitted = head_tail(text, preview)
+        return (f"{head}\n…[truncated {omitted} chars when the context was compacted; full value in artifact "
+                f"{h!r}: artifact.read(handle={h!r}, offset={len(head)})]…\n{tail}")
+
+    def walk(v: Any, path: str) -> Any:
+        if isinstance(v, str):
+            return cut(v, path) if estimate_tokens(v) > budget else v
+        if isinstance(v, dict):
+            return {k: walk(x, f"{path}-{k}" if path else str(k)) for k, x in v.items()}
+        if isinstance(v, list):
+            marks, out = [], []
+            for i, x in enumerate(v):
+                marks.append(len(arts))
+                out.append(walk(x, f"{path}-{i}" if path else str(i)))
+            if len(out) > 2 and estimate_tokens(_dumps(out)) > budget:
+                nh = nt = 0
+                room = int(preview * 0.4)
+                while nh < len(out) - 1 and estimate_tokens(_dumps(out[:nh + 1])) <= room:
+                    nh += 1
+                room = preview - room
+                while nh + nt < len(out) - 1 and estimate_tokens(_dumps(out[len(out) - nt - 1:])) <= room:
+                    nt += 1
+                del arts[marks[nh]:marks[len(out) - nt] if nt else len(arts)]  # no artifacts for elided items
+                h = handle(f"{path}-items" if path else "items")
+                arts.append((h, _dumps(v)))
+                note = (f"…[truncated {len(out) - nh - nt} of {len(out)} items when the context was compacted; "
+                        f"full value in artifact {h!r}: artifact.read(handle={h!r})]…")
+                out = [*out[:nh], note, *(out[len(out) - nt:] if nt else [])]
+            return out
+        return v
+
+    try:
+        data = json.loads(arguments)
+    except json.JSONDecodeError:
+        return cut(arguments, "raw"), arts
+    new = walk(data, "")
+    return (_dumps(new), arts) if arts else (arguments, [])
+
+
+def _dumps(v: Any) -> str:
+    return json.dumps(v, ensure_ascii=False)
+
+
+def _artifact_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_\-.]", "_", name)
+
+
+def _safe_handle(name: str) -> str:
+    """An artifact handle ``artifact.read`` accepts (no dots, so never ``..``)."""
+    return re.sub(r"[^A-Za-z0-9_\-]", "_", name)
 
 
 def _msg_tokens(m: Message) -> int:

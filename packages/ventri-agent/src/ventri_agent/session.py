@@ -10,8 +10,10 @@
 * ``msg``      -- one history message (user / assistant incl. reasoning_content / tool / system tail)
 * ``compact``  -- ``drop`` leading history messages replaced by ``summary``;
   intra-turn compaction adds ``span`` (``[a, b)`` of the remaining history,
-  replaced by the ``progress`` summary), ``steps`` and ``trim`` (``[{seq,
-  content}]`` oversized kept tool results); see :func:`apply_compact`
+  replaced by the ``progress`` summary), ``steps``, ``trim`` (``[{seq,
+  content}]`` oversized kept tool results) and ``args`` (``[{seq, calls: {call
+  id: arguments}}]`` retained tool calls with shortened argument values); see
+  :func:`apply_compact`
 * ``prune``    -- written only by 0.2.0a1 development builds (removed context
   pruning); ignored on replay, so such a log loads with the full messages
 * ``usage``    -- one model call: model, route, usage, cost, peak flag
@@ -28,7 +30,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .messages import Message, Usage, now_ts
+from .messages import Message, ToolCall, Usage, now_ts
 
 
 @dataclass
@@ -48,6 +50,8 @@ class AgentPreset:
     compact_at: float = 0.6                # compaction trigger, fraction of the model's soft context
     compact_keep_turns: int = 4            # cross-turn compaction keeps the last N user turns
     compact_keep_steps: int = 6            # intra-turn compaction keeps the last N model steps of the turn
+    compact_args_tokens: int = 4_000       # at compaction, retained tool-call argument strings above this are
+                                           # shortened (head + tail, full value in an artifact); 0: last resort only
 
 
 @dataclass
@@ -151,7 +155,8 @@ def apply_compact(history: list[Message], rec: dict[str, Any]) -> list[Message]:
     rebuilds the same messages): drop the first ``drop`` messages in favour of
     ``summary``; replace ``span`` = ``[a, b)`` of what remains (the earlier
     steps of the current turn) with the ``progress`` summary; replace the
-    content of ``trim`` messages (by ``seq``)."""
+    content of ``trim`` messages and the arguments of ``args`` tool calls (by
+    ``seq`` and call id)."""
     drop = int(rec.get("drop") or 0)
     rest = list(history[drop:])
     span = rec.get("span")
@@ -163,8 +168,17 @@ def apply_compact(history: list[Message], rec: dict[str, Any]) -> list[Message]:
     if trims:
         rest = [replace(m, content=trims[int(m.meta["seq"])], meta={**m.meta, "trimmed": True})
                 if m.meta.get("seq") is not None and int(m.meta["seq"]) in trims else m for m in rest]
+    args = {int(e["seq"]): {str(k): str(v) for k, v in dict(e["calls"]).items()} for e in rec.get("args") or []}
+    if args:
+        rest = [_with_args(m, args[int(m.meta["seq"])])
+                if m.meta.get("seq") is not None and int(m.meta["seq"]) in args else m for m in rest]
     head = [Message.system(str(rec.get("summary") or ""), compacted=drop)] if drop else []
     return head + rest
+
+
+def _with_args(m: Message, calls: dict[str, str]) -> Message:
+    tcs = [ToolCall(tc.id, tc.name, calls.get(tc.id, tc.arguments)) for tc in m.tool_calls]
+    return replace(m, tool_calls=tcs, meta={**m.meta, "args_shortened": True})
 
 
 def read_usage(sessions_dir: Path) -> list[dict[str, Any]]:
