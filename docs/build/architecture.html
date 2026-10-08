@@ -37,12 +37,12 @@ h1 small{font-size:18px;font-weight:400;color:#5b6475;margin-left:16px}
 svg{position:absolute;left:0;top:0}
 .al{font-size:13px;fill:#3d4556;font-family:"Noto Sans CJK SC",sans-serif}
 </style></head><body>
-<h1>Ventri 总体架构<small>Ventri Core 内核 + Ventri Agent（DeepSeek 优先的个人 Agent）· 2026-10-08 · v1.1</small></h1>
+<h1>Ventri 总体架构<small>Ventri Core 内核 + Ventri Agent（DeepSeek 优先的个人 Agent）· 2026-10-08 · v1.2</small></h1>
 
 <!-- left column -->
 <div class="box" style="left:30px;top:160px;width:230px;height:200px">
   <h3>👤 用户</h3>
-  <p>macOS 终端 · 浏览器 · 飞书 · Telegram</p>
+  <p>macOS 终端 · 飞书 · 浏览器（计划）</p>
   <p style="margin-top:8px">对话、审批卡片、<br>批准 / 回滚演化提案</p>
   <p style="margin-top:8px;color:#c8553d"><b>批准只来自人类渠道</b></p>
 </div>
@@ -58,16 +58,14 @@ svg{position:absolute;left:0;top:0}
 </div>
 
 <!-- host frame -->
-<div class="abs frame" style="left:282px;top:118px;width:1050px;height:1100px"><div class="frame-label">宿主进程 · macOS（1.0 唯一平台）· 单机单用户 · Python 3.12+ · anyio 结构化并发（插件树 = 任务树 = 作用域树）</div></div>
+<div class="abs frame" style="left:282px;top:118px;width:1050px;height:1100px"><div class="frame-label">宿主进程 · macOS（1.0 唯一平台）· 单机单用户 · Python 3.12+ · asyncio（经 anyio）结构化并发（插件树 = 任务树 = 作用域树）</div></div>
 
 <div class="band L4" style="top:160px;height:140px">
   <div class="tag"><b>L4 渠道</b><span>ventri-agent</span></div>
   <div class="body">
-    <div class="chip">CLI<i>M2 · 流式 · 内联审批</i></div>
-    <div class="chip">本地 Web UI<i>M4 · 审批卡片 · 树/trace 查看</i></div>
-    <div class="chip">飞书机器人<i>M4 · 长连接事件</i></div>
-    <div class="chip">Telegram<i>M4</i></div>
-    <div class="chip dash">企业微信<i>1.0 后</i></div>
+    <div class="chip">CLI<i>M2 · 主界面 · 流式 · 内联审批</i></div>
+    <div class="chip dash">本地 Web UI<i>计划 · M4 · 审批卡片 · 树/trace</i></div>
+    <div class="chip">飞书机器人<i>M4 · 1.0 唯一 IM · 长连接事件</i></div>
   </div>
 </div>
 
@@ -75,7 +73,7 @@ svg{position:absolute;left:0;top:0}
   <div class="tag"><b>L3 个人 Agent 插件</b><span>ventri-agent / 第三方</span></div>
   <div class="body">
     <div class="chip">长期记忆<i>SQLite + FTS5 · 可选向量</i></div>
-    <div class="chip">工具<i>fs · shell · web · notes · calendar</i></div>
+    <div class="chip">工具<i>fs · shell · web.fetch · notes · calendar</i></div>
     <div class="chip">MCP 桥<i>每个服务器 = 一个 fiber</i></div>
     <div class="chip">Skills<i>SKILL.md · 按需加载</i></div>
     <div class="chip">例行任务<i>谷时调度</i></div>
@@ -128,7 +126,7 @@ svg{position:absolute;left:0;top:0}
 
 <!-- right column -->
 <div class="box ext" style="left:1420px;top:160px;width:350px;height:105px">
-  <h3>🌐 外部世界</h3><p>IM 平台（飞书 / Telegram）<br>Web 搜索与抓取 · 日历 (CalDAV)</p>
+  <h3>🌐 外部世界</h3><p>飞书开放平台<br>Web 抓取（搜索推迟）· 日历 (CalDAV)</p>
 </div>
 <div class="box ext" style="left:1420px;top:300px;width:350px;height:95px">
   <h3>🔌 MCP 服务器</h3><p>stdio 子进程 · Streamable HTTP</p>

@@ -4,9 +4,10 @@ import pytest
 from ventri import plugin
 
 
-@pytest.fixture(params=["asyncio", "trio"])
-def anyio_backend(request):
-    return request.param
+@pytest.fixture
+def anyio_backend():
+    # Ventri supports asyncio only (DESIGN.md D11); anyio is an internal dependency.
+    return "asyncio"
 
 
 async def wait_for(pred, timeout=2.0):

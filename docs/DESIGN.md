@@ -6,7 +6,7 @@
 >
 > **约定**：本文中的“**决定**”是已拍板的路线；“**目标**”是需要基准测试验证的数字；“**估算**”是工期估计，不是承诺。每张图在文中以 Mermaid 源码给出，并附同名 PNG（`docs/img/`，由 `docs/build/build.py` 渲染）。
 >
-> **修订**：2026-10-08 v1.1 —— 记录 Jeff 对第 10 节待决问题的答复（许可证、投入、数据策略、平台、T2 网络权限），新增 6.1 Harness 生态兼容，更新 PyPI 占位状态。
+> **修订**：2026-10-08 v1.1 —— 记录 Jeff 对第 10 节待决问题的答复（许可证、投入、数据策略、平台、T2 网络权限），新增 6.1 Harness 生态兼容，更新 PyPI 占位状态。v1.2 —— 其余问题全部拍板：名称 Ventri Agent / `va`、不建 GitHub 组织、IM 只做飞书、web 搜索推迟、内核只支持 asyncio。
 
 ---
 
@@ -30,7 +30,7 @@
 
 ### 1.3 目标用户（按优先级）
 
-1. **P1 — 开发者型个人用户（含 Jeff 本人）**：愿意写 YAML、装插件、看日志；要一个可 hack、自托管、成本低、中文友好、能接飞书/Telegram 的个人 Agent。**这是 1.0 之前唯一的验收用户群。**
+1. **P1 — 开发者型个人用户（含 Jeff 本人）**：愿意写 YAML、装插件、看日志；要一个可 hack、自托管、成本低、中文友好、能接飞书的个人 Agent。**这是 1.0 之前唯一的验收用户群。**
 2. **P2 — 构建长期运行 Agent 服务的 Python 开发者**：需要插件热插拔、配置热更新、会话级资源回收、可回滚变更。他们是内核（`ventri`）的用户，通过 Agent 的口碑被吸引而来。
 3. **非目标用户**：不写配置的普通消费者（1.0 前不做安装器/桌面 App）、企业多租户部署。
 
@@ -87,7 +87,7 @@ $ va history && va rollback 17  # 演化账本；一键回滚 = 反向事务，�
 | **L1 标准插件** | `ventri-std` | 声明式配置加载器/监视器、profiles、secrets、日志、JSONL/OTel 导出、HTTP 客户端、存储、调度器、沙箱宿主、`inspect`、`ventri` CLI | `ventri` + 可选 extras |
 | **L2 Agent 运行时** | `ventri-agent` | ModelProvider 接口与 DeepSeek/OpenAI 兼容适配器、AgentLoop、ToolRegistry、SessionManager、ContextBuilder、权限与审批、记忆接口、演化管理器 | `ventri`, `ventri-std`, `httpx`, `pydantic` |
 | **L3 个人 Agent 插件** | `ventri-agent`（内置）/ 第三方 | 记忆实现、文件/Shell/Web/日历/笔记工具、MCP 桥、Skills、例行任务 | L2 |
-| **L4 渠道** | `ventri-agent`（内置）/ 第三方 | CLI → Web UI → 飞书 / Telegram / 企业微信 | L2 |
+| **L4 渠道** | `ventri-agent`（内置）/ 第三方 | CLI → 本地 Web UI（计划）→ 飞书（1.0 唯一 IM） | L2 |
 
 ### 3.2 依赖分层（源码依赖方向）
 
@@ -97,12 +97,12 @@ block-beta
   columns 1
   block:L4
     columns 7
-    t4["L4 渠道"] cli["CLI"] web["Web UI"] fs4["飞书"] tg["Telegram"] wc["企业微信<br/>(1.0 后)"] space
+    t4["L4 渠道"] cli["CLI<br/>(主界面)"] web["本地 Web UI<br/>(计划, M4)"] fs4["飞书<br/>(1.0 唯一 IM)"] space space space
   end
   space
   block:L3
     columns 7
-    t3["L3 个人 Agent 插件"] mem["记忆<br/>短期 / 长期"] tools["工具<br/>fs / shell / web<br/>日历 / 笔记"] mcp["MCP 桥"] skills["Skills"] rt["例行任务"] insp["inspect<br/>只读自省"]
+    t3["L3 个人 Agent 插件"] mem["记忆<br/>短期 / 长期"] tools["工具<br/>fs / shell / web.fetch<br/>日历 / 笔记"] mcp["MCP 桥"] skills["Skills"] rt["例行任务"] insp["inspect<br/>只读自省"]
   end
   space
   block:L2
@@ -117,7 +117,7 @@ block-beta
   space
   block:L0
     columns 7
-    t0["L0 Ventri Core<br/>ventri (仅 anyio)"] k["Kernel<br/>Context"] f["Fiber<br/>状态机"] r["服务注册表<br/>+ realm"] t["事务"] e["事件"] tr["Trace"]
+    t0["L0 Ventri Core<br/>ventri (asyncio, 经 anyio)"] k["Kernel<br/>Context"] f["Fiber<br/>状态机"] r["服务注册表<br/>+ realm"] t["事务"] e["事件"] tr["Trace"]
   end
   L4 --> L3
   L3 --> L2
@@ -138,7 +138,7 @@ block-beta
   class t2 tag2
   class t1 tag1
   class t0 tag0
-  class cli,web,fs4,tg,wc c4
+  class cli,web,fs4 c4
   class mem,tools,mcp,skills,rt,insp c3
   class prov,loop,ctxb,reg,perm,evo c2
   class cfg,sch,sbx,obs,sto,vcli c1
@@ -288,7 +288,7 @@ stateDiagram-v2
 - **异常归属（supervisor 语义）**：spawn 任务抛异常 → 所属 fiber 被拆除并置 `FAILED`；兄弟与 Kernel 不受影响。
 - **重入安全**：每个 fiber 一把锁并记录持锁任务；加载中被 dispose、自我 dispose、在自己 spawn 的任务里 dispose 自己，均不死锁、不泄漏。
 - **取消即不泄漏**：调用 `await ctx.plugin(...)` 的任务被取消，正在加载的 fiber 被完整拆除。
-- **后端（决定）**：内核在 asyncio 与 trio 双后端上测试；`ventri-agent` 及其插件**只官方支持 asyncio**（生态库如 MCP SDK、httpx 在 anyio 上可用，但 IM SDK 多为 asyncio-only）。
+- **后端（决定）**：**只支持 asyncio**（内核与 Agent 一致），不再支持 trio。实现上内核继续以 `anyio` 作为内部依赖、固定运行在 asyncio 后端上——这是最简单的做法：`anyio` 的 task group、可 shield 的 `CancelScope` 与 `fail_after` 正是内核的结构化并发与“拆除不被打断”所依赖的原语，标准库 `asyncio.TaskGroup` 没有等价的嵌套取消作用域，改写为纯 asyncio 收益小、风险大。`anyio` 不出现在公开 API 中，插件可直接使用 asyncio 生态（MCP SDK、httpx、飞书 SDK）。原型的测试已改为只在 asyncio 上运行。
 
 ### 4.5 事务语义
 
@@ -657,8 +657,9 @@ class ModelProvider(Protocol):
 
 - `ToolRegistry` 是服务；每个工具是一个插件注册的 `Tool(name, schema, handler, risk, idempotent, parallel_safe)`；插件卸载 → 工具自动注销（effect）→ 下一 epoch 不再出现。
 - schema 从 pydantic 模型生成，默认满足 DeepSeek strict 约束。
-- **内置工具（M2）**：`fs.read/list/search`、`fs.write/edit`（限定 roots，写入需审批）、`shell.run`（工作目录与超时受限，默认每次审批）、`web.fetch`（httpx + 正文抽取 → Markdown）、`web.search`（提供商可插拔：SearXNG 自建 / 商业 API）、`notes.*`（Markdown 文件夹，兼容 Obsidian vault）、`time.now`、`memory.*`、`inspect.*`（只读自省）。
+- **内置工具（M2）**：`fs.read/list/search`、`fs.write/edit`（限定 roots，写入需审批）、`shell.run`（工作目录与超时受限，默认每次审批）、`web.fetch`（httpx + 正文抽取 → Markdown；用户给出 URL 或订阅源）、`notes.*`（Markdown 文件夹，兼容 Obsidian vault）、`time.now`、`memory.*`、`inspect.*`（只读自省）。
 - **M3**：`calendar.*`（先 CalDAV / 本地 .ics，后飞书日历）、`routine.*`（让 Agent 创建例行任务，属于有后果动作）。
+- **web 搜索不在 1.0 范围内**（推迟决策，见 10.3）；需要搜索时可由用户自行接入提供搜索能力的 MCP 服务器，但它不是内置能力，也不进入验收。
 - 只读且 `parallel_safe` 的工具调用在同一轮内并发执行（anyio task group，归属本会话 fiber）。
 
 ### 5.5 MCP 桥与 Skills
@@ -702,10 +703,10 @@ stateDiagram-v2
 | 顺序 | 渠道 | 里程碑 | 要点 |
 |---|---|---|---|
 | 1 | **CLI** | M2 | 流式输出、思考折叠、内联审批、`/memory` `/tree` `/cost` `/think` 斜杠命令 |
-| 2 | **本地 Web UI** | M4 | 仅绑定 127.0.0.1（远程访问用户自行反代）；对话、审批卡片、插件树与 trace 查看器、演化提案与账本 |
-| 3 | **飞书** | M4 | 自建应用机器人；使用长连接事件订阅（无需公网回调地址）；审批卡片用交互式消息 |
-| 4 | **Telegram** | M4 | Bot API 长轮询；inline keyboard 审批 |
-| 5 | 企业微信 | 1.0 后 | 视需求；**个人微信不做**（无官方 API，违反服务条款风险） |
+| 2 | **飞书** | M4 | **1.0 唯一的 IM 渠道**。自建应用机器人；使用长连接事件订阅（无需公网回调地址）；审批卡片用交互式消息 |
+| 3 | **本地 Web UI**（计划） | M4 | 仅绑定 127.0.0.1（远程访问用户自行反代）；对话、审批卡片、插件树与 trace 查看器、演化提案与账本 |
+
+**决定**：IM 只做飞书；Telegram、企业微信移出 1.0 范围（以后可由第三方渠道插件提供，渠道接口不变）；**个人微信不做**（无官方 API，违反服务条款风险）。CLI 是主界面与开发界面，本地 Web UI 保留为 M4 计划项。
 
 渠道是 stop-first 插件（独占长连接），配置变更时先断后连。
 
@@ -782,7 +783,7 @@ flowchart TB
 |---|---|---|---|---|
 | `ventri` | `ventri` | 内核 | `anyio` | ✅ 已占位（0.0.1，2026-10-08 发布） |
 | `ventri-std` | `ventri_std` | 标准插件 + `ventri` CLI | `ventri`；extras：`[otel]` `[watch]` `[sandbox]` | ⏳ 尚未占位（2026-10-08 仍可注册） |
-| `ventri-agent` | `ventri_agent` | Agent 运行时、内置插件、渠道、`va` CLI | `ventri-std`, `httpx`, `pydantic>=2`, `mcp`；extras：`[web]` `[feishu]` `[telegram]` `[vec]` | ✅ 已占位（0.0.1，2026-10-08 发布） |
+| `ventri-agent` | `ventri_agent` | Agent 运行时、内置插件、渠道、`va` CLI | `ventri-std`, `httpx`, `pydantic>=2`, `mcp`；extras：`[web]` `[feishu]` `[vec]` | ✅ 已占位（0.0.1，2026-10-08 发布） |
 
 ```text
 ventri/                      # 仓库根（当前原型所在）
@@ -796,7 +797,7 @@ ventri/                      # 仓库根（当前原型所在）
 │   └── ventri-agent/        # L2–L4
 │       └── src/ventri_agent/#   providers loop context tools memory mcp skills
 │                            #   permission sessions evolution routines channels
-├── tests/                   # 内核 asyncio+trio；agent asyncio；夜间 DeepSeek 契约测试
+├── tests/                   # 只用 asyncio；夜间 DeepSeek 契约测试
 ├── benchmarks/              # 4.13 的性能目标
 ├── examples/
 ├── docs/                    # 本文档、ADR (docs/adr/NNNN-*.md)、用户手册
@@ -832,7 +833,7 @@ gantt
   dateFormat YYYY-MM-DD
   axisFormat %Y-%m
   section M0 原型
-  原型完成 48 测试             :milestone, m0, 2026-10-08, 0d
+  原型完成 24 测试             :milestone, m0, 2026-10-08, 0d
   section M1 内核 Alpha
   作用域与 realm               :m1a, 2026-10-12, 14d
   声明式配置与事务 diff        :m1b, after m1a, 12d
@@ -854,7 +855,7 @@ gantt
   M3 退出评审                  :milestone, after m3d, 0d
   section M4 渠道 生态 1.0
   Web UI                       :m4a, 2027-04-05, 35d
-  飞书 Telegram                :m4b, 2027-04-05, 35d
+  飞书渠道                     :m4b, 2027-04-05, 35d
   开发套件 文档 外部用户       :m4c, after m4a, 28d
   1.0 发布                     :milestone, after m4c, 0d
 ```
@@ -863,7 +864,7 @@ gantt
 
 ### M0 — 原型（✅ 已完成，2026-10-08）
 
-- 交付：Kernel/Context/Fiber/事务/观测，约 1000 行有效代码；24 个测试 × asyncio/trio = 48 通过；混沌测试 40 个种子；demo。
+- 交付：Kernel/Context/Fiber/事务/观测，约 1000 行有效代码；24 个测试（最初在 asyncio + trio 上各跑一遍共 48 个；按 D11 已改为只跑 asyncio，24 个通过）；混沌测试 40 个种子；demo。
 - 结论：结构化并发与事务回滚两项核心创新可行，语义已由测试固定。
 
 ### M1 — 内核 Alpha（估算 6–7 周）
@@ -876,11 +877,11 @@ gantt
 4. stop-first 替换、dry-run 事务、事务元数据与超时；
 5. 签名注入、可选依赖、`Secret[T]`、`ventri stubgen`；事件优先级、类型化事件、拦截器；
 6. trace schema v1 + JSONL sink；
-7. monorepo + uv workspace、CI（macOS runner 为主；3.12/3.13/3.14 × asyncio/trio）、hypothesis 属性测试、benchmarks；补占位 `ventri-std`（`ventri`、`ventri-agent` 已于 2026-10-08 占位）；发布 `ventri 0.2.0a1`。
+7. monorepo + uv workspace、CI（macOS runner 为主；Python 3.12/3.13/3.14，只用 asyncio）、hypothesis 属性测试、benchmarks；补占位 `ventri-std`（`ventri`、`ventri-agent` 已于 2026-10-08 占位）；发布 `ventri 0.2.0a1`。
 
 退出标准：
 
-- [ ] M0 全部测试 + 新增作用域/配置/诊断测试通过（双后端）；混沌测试 ≥ 1000 种子无泄漏、无死锁；
+- [ ] M0 全部测试 + 新增作用域/配置/诊断测试通过（asyncio）；混沌测试 ≥ 1000 种子无泄漏、无死锁；
 - [ ] 两个会话 scope 隔离：互不可见、各自回收后 `snapshot()` 回到基线；
 - [ ] 修改 YAML 中任一插件配置 → 单事务热应用；注入失败 → 回滚且旧配置继续服务；
 - [ ] 4.13 全部性能目标达成（或记录偏差并调整目标的 ADR）；
@@ -889,7 +890,7 @@ gantt
 
 ### M2 — Agent MVP（CLI）（估算 7–8 周）
 
-交付：`ventri-agent 0.2`：ModelProvider 接口；DeepSeek 适配器（flash/pro、思考与 effort、reasoning_content 回传校验、strict 工具、JSON 输出、流式、usage/缓存命中/峰谷计价、并发与退避）；OpenAI 兼容适配器；AgentLoop + 预算；ToolRegistry + 内置工具（fs、shell、web.fetch、web.search、notes、time、memory、inspect）；会话 scope + JSONL 日志 + 挂起/恢复；短期与长期记忆 v1（SQLite FTS5）；权限引擎 + CLI 审批 + 审计日志；缓存友好 ContextBuilder（epoch、压缩、工件）；`va` CLI。
+交付：`ventri-agent 0.2`：ModelProvider 接口；DeepSeek 适配器（flash/pro、思考与 effort、reasoning_content 回传校验、strict 工具、JSON 输出、流式、usage/缓存命中/峰谷计价、并发与退避）；OpenAI 兼容适配器；AgentLoop + 预算；ToolRegistry + 内置工具（fs、shell、web.fetch、notes、time、memory、inspect；不含 web 搜索）；会话 scope + JSONL 日志 + 挂起/恢复；短期与长期记忆 v1（SQLite FTS5）；权限引擎 + CLI 审批 + 审计日志；缓存友好 ContextBuilder（epoch、压缩、工件）；`va` CLI。
 
 退出标准：
 
@@ -909,16 +910,17 @@ gantt
 - [ ] 沙箱逃逸测试集（文件系统、网络必须完全不可达、环境变量、进程、资源耗尽、RPC 越权）在 macOS 上全部通过；外部人员做一次安全审阅；
 - [ ] 10 个端到端演化场景（3 Skill、4 配置补丁、3 T2 插件）全部走通，回滚后快照与提案前相等；
 - [ ] 测试证明：模型输出无法构成批准；提案无法修改权限策略或能力上限；
-- [ ] 5 个常用 MCP 服务器（文件系统、GitHub、浏览器类、数据库类、搜索类）可用，崩溃自动下线/恢复；
+- [ ] 5 个常用 MCP 服务器（文件系统、GitHub、浏览器类、数据库类、笔记/知识库类）可用，崩溃自动下线/恢复；
 - [ ] 每日简报例行任务稳定运行 14 天，且全部在谷时执行。
 
 ### M4 — 渠道、生态与 1.0（估算 10–12 周）
 
-交付：本地 Web UI（对话、审批卡片、插件树/trace 查看器、演化账本）；飞书、Telegram 渠道；插件开发套件（模板、`ventri.testing` 测试夹具、文档）；用户手册与示例；插件索引页；安全审阅修复；semver 与弃用策略；`ventri 1.0` / `ventri-agent 1.0`。
+交付：飞书渠道（1.0 唯一 IM：长连接事件、交互式审批卡片、群聊与私聊会话映射）；本地 Web UI（计划项：对话、审批卡片、插件树/trace 查看器、演化账本）；插件开发套件（模板、`ventri.testing` 测试夹具、文档）；用户手册与示例；插件索引页；安全审阅修复；semver 与弃用策略；`ventri 1.0` / `ventri-agent 1.0`。
 
 退出标准（1.0）：
 
 - [ ] Jeff 之外 ≥ 20 名周活用户（P1 画像），≥ 5 个第三方插件；
+- [ ] 飞书渠道连续 14 天作为 Jeff 的日常入口稳定运行（断线自动重连、审批卡片全流程可用）；
 - [ ] 内核、配置 schema、trace schema、插件 API 冻结；
 - [ ] 连续 30 天无 P0 缺陷；从 0.x 的升级路径有文档与自动迁移；
 - [ ] 1.4 节的完成态体验在 macOS 上全部可演示；安装文档只覆盖 macOS。
@@ -946,12 +948,12 @@ gantt
 | R9 | **隐私与数据出境**（对话与记忆发送到第三方 API） | 中 / 中 | 已决定接受：所有数据可发送到 DeepSeek API；`va init` 明示这一点；本地模型路由是以后的可选项，不在路线图中 |
 | R10 | **范围蔓延**（个人 Agent 功能无穷） | 高 / 中 | 本文第 1.2 / 8 节为准；新增需求先写 ADR 并指定里程碑；M2 工具清单封顶 |
 | R11 | **单人维护（巴士因子 = 1）** | 高 / 中 | 测试与 ADR 固化语义；文档优先；模块边界清晰便于贡献者介入 |
-| R12 | **双后端（asyncio/trio）维护成本** | 低 / 低 | 只对内核承诺双后端；若 M1 中成本超出预期，降级为“trio 尽力支持” |
+| R12 | **依赖 anyio 但只跑 asyncio**：可能被误认为支持 trio，或 anyio 行为与 asyncio 原生语义有细微差别 | 低 / 低 | 文档写明只支持 asyncio；anyio 不出现在公开 API；测试只跑 asyncio；如有必要再评估改为纯 asyncio |
 | R13 | **macOS 唯一平台**：`sandbox-exec` 已被 Apple 标记弃用、未来版本可能变化；排除 Linux 服务器用户 | 中 / 中 | 沙箱藏在 `SandboxBackend` 接口后；每个 macOS 大版本跑逃逸测试；Linux 后端在 1.0 后按需求排期；内核纯 Python，不绑定平台 |
 
 ---
 
-## 10 决策记录与待决问题
+## 10 决策记录
 
 ### 10.1 已决（2026-10-08，Jeff）
 
@@ -963,14 +965,16 @@ gantt
 | D4 | T2 插件网络权限 | **推迟**：1.0 范围内 T2 无网络，`net` 字段保留；以后再决定 | 4.11 |
 | D5 | 1.0 平台 | **只支持 macOS**（沙箱用 `sandbox-exec` / macOS 机制）；Linux、Windows 推迟到 1.0 之后 | 1.2、3.1、4.11、7、8、R13 |
 | D6 | 与 Harness 的关系 | 不兼容运行时、不做 `cordis.yml` 导入；通过 MCP（主路径）、纯文本 Skills、schema/提示词复用资产；Node 桥接 1.0 后可选 | 6.1 |
-| — | PyPI 占位 | `ventri`、`ventri-agent` 已发布 0.0.1 占位（2026-10-08）；`ventri-std` 尚未占位 | 7 |
+| D7 | 名称 | Agent 正式名 **Ventri Agent**，CLI 命令 **`va`** | 1.4、7 |
+| D8 | 组织 | **不创建 GitHub 组织** | 7 |
+| D9 | IM 渠道 | **只做飞书**；Telegram、企业微信移出 1.0；CLI 保留为主界面，本地 Web UI 为 M4 计划项 | 3、5.8、8 |
+| D10 | web 搜索 | **推迟**，移出 1.0 范围（无内置 `web.search`） | 5.4、8、10.3 |
+| D11 | 异步后端 | **只支持 asyncio**；放弃 trio。内核保留 `anyio` 作内部依赖、固定 asyncio 后端；原型测试已改为只跑 asyncio | 4.4、7、8、R12 |
+| — | PyPI 占位 | `ventri`、`ventri-agent` 已发布 0.0.1 占位（2026-10-08）；`ventri-std` 尚未占位，列为 M1 任务 | 7 |
 
 ### 10.2 仍待决
 
-1. **名称与组织**：Agent 正式名是否就叫 “Ventri Agent”，CLI 命令 `va` 是否可以？是否创建 GitHub 组织？何时占位 `ventri-std`（建议立即）？
-2. **IM 渠道优先级**：飞书 → Telegram 的顺序是否正确？企业微信是否需要提前到 1.0 前？
-3. **web.search 默认提供商**：自建 SearXNG（免费、需部署）还是某个商业搜索 API（需 key、需付费）？
-4. **trio 支持**：内核长期保持 asyncio + trio 双后端，还是 M1 后只保 asyncio？
+无。截至 2026-10-08，第 10 节此前列出的问题已全部拍板（D1–D11）。
 
 ### 10.3 推迟的决策（1.0 之后再议）
 
@@ -978,6 +982,8 @@ gantt
 - Linux / Windows 支持与对应的沙箱后端（D5）。
 - 敏感会话的本地模型路由（D3）。
 - Harness TS 插件的 Node 子进程桥接（D6）。
+- web 搜索：是否内置、默认提供商（自建 SearXNG 或商业 API）（D10）。
+- Telegram、企业微信等其他 IM 渠道（D9）。
 
 ---
 

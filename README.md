@@ -16,8 +16,8 @@ Ventri 是一个小而可运行的插件内核（库代码约 1000 行有效代�
 ## 快速开始
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install anyio pytest trio
-.venv/bin/python -m pytest -q          # asyncio + trio 两个后端各跑一遍
+python3 -m venv .venv && .venv/bin/pip install anyio pytest
+.venv/bin/python -m pytest -q          # 只在 asyncio 上运行（Ventri 只支持 asyncio）
 .venv/bin/python examples/demo.py
 ```
 
@@ -51,7 +51,7 @@ async with Kernel() as app:
 | `ventri/transaction.py` | 事务：暂存（staging）、提交校验、原子交换、回滚 |
 | `ventri/observe.py` | `snapshot()` / `tree()` |
 | `ventri/plugin.py` | 插件描述（函数或类、`inject`、`Config`）与 `@plugin` 装饰器 |
-| `tests/` | 24 个测试 × 2 个后端（asyncio、trio）= 48 |
+| `tests/` | 24 个测试（asyncio） |
 | `examples/demo.py` | 假 LLM 服务 + 工具插件 + 后台任务 + 失败事务回滚 |
 
 ## 架构
@@ -127,7 +127,7 @@ async with Kernel() as app:
 
 ## 测试
 
-`pytest` + anyio 插件，**asyncio 与 trio 双后端**各跑一遍。覆盖：inject 挂起→激活、服务移除自动卸载与恢复、级联拆除顺序、
+`pytest` + anyio 插件，只在 **asyncio** 上运行（Ventri 只支持 asyncio；`anyio` 仅作内部依赖，提供 task group / CancelScope 等结构化并发原语）。覆盖：inject 挂起→激活、服务移除自动卸载与恢复、级联拆除顺序、
 spawn 任务随卸载取消、Kernel 关闭取消所有任务、任务崩溃只影响所属 fiber、加载中 dispose、自我 dispose、取消加载不泄漏、
 类型化访问/冲突、事件四种模式、快照/trace、事务提交与隔离、apply 抛错回滚、用户代码抛错回滚、提交期失败/strict 回滚、
 replace 成功与回滚（含替换失败的 FAILED fiber）、并发事务排队/拒绝/嵌套报错、提交冲突、事务卸载、事务被取消回滚，

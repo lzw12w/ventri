@@ -7,7 +7,7 @@ license = { text = "MIT" }
 dependencies = ["anyio>=4.4"]
 
 [project.optional-dependencies]
-test = ["pytest>=8", "trio>=0.25"]
+test = ["pytest>=8"]
 
 [build-system]
 requires = ["setuptools>=68"]
