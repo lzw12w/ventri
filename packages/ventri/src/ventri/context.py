@@ -33,18 +33,22 @@ class Context:
         return self.fiber.parent.ctx if self.fiber.parent else None
 
     # ---------------------------------------------------------------- plugins
-    async def plugin(self, plugin: Any, config: Any = None, *, meta: dict | None = None) -> Fiber:
+    async def plugin(self, plugin: Any, config: Any = None, *, meta: dict | None = None,
+                     timeout: Any = _MISSING, retry: Any = _MISSING) -> Fiber:
         """Load ``plugin`` as a child of this context's fiber.
 
-        Returns the fiber; it is ACTIVE, PENDING (deps missing) or FAILED (see
-        ``fiber.error``). If the *caller* is cancelled mid-load the new fiber is
-        disposed and nothing it registered survives.
+        Returns the fiber; it is ACTIVE, PENDING (deps missing; see
+        ``fiber.pending_reason``) or FAILED (see ``fiber.error``; a load that exceeds
+        the load timeout fails with LoadTimeout). ``timeout`` / ``retry`` override
+        the plugin's metadata for this fiber. If the *caller* is cancelled mid-load
+        the new fiber is disposed and nothing it registered survives.
         """
         from .fiber import Fiber
 
         if self.fiber.state not in LIVE:
             raise RuntimeError(f"cannot load plugins under {self.fiber!r}")
-        return await self._load(Fiber(self.kernel, self.fiber, plugin, config, meta=meta))
+        return await self._load(Fiber(self.kernel, self.fiber, plugin, config, meta=meta,
+                                      timeout=timeout, retry=retry))
 
     async def scope(self, name: str, isolate: Iterable[Any] = (), *,
                     meta: dict | None = None) -> Fiber:

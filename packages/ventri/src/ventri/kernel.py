@@ -14,7 +14,7 @@ import anyio
 from .context import Context
 from .errors import KernelError
 from .fiber import LIVE, Fiber, State, task_local
-from .plugin import keyname
+from .plugin import Retry, keyname
 
 if TYPE_CHECKING:  # pragma: no cover
     from .transaction import Transaction
@@ -72,7 +72,10 @@ class TraceEvent:
 class Kernel(Context):
     """``async with Kernel() as app:`` -- the root context. Closing it disposes everything."""
 
-    def __init__(self, *, trace_limit: int = 10_000) -> None:
+    def __init__(self, *, trace_limit: int = 10_000, load_timeout: float | None = 30.0,
+                 retry: Retry | dict | None = None) -> None:
+        self.load_timeout = load_timeout     # default for plugins without ``timeout``
+        self.retry = Retry.coerce(retry)     # default restart policy (None: never retry)
         self._ids = itertools.count(1)
         self._seq = itertools.count(1)
         self._listener_seq = itertools.count(1)
@@ -337,6 +340,14 @@ class Kernel(Context):
                 await fiber._fail(error)
         if self._tg is not None:
             self._tg.start_soon(fail)
+
+    def _schedule_retry(self, fiber: Fiber, delay: float, gen: int) -> None:
+        async def retry() -> None:
+            await anyio.sleep(delay)
+            async with self._op(None):
+                await fiber._retry_now(gen)
+        if self._tg is not None:
+            self._tg.start_soon(retry, name=f"retry:{fiber.label}")
 
     # ---------------------------------------------------------------- events
     def _listeners_for(self, event: Any, emitter: Fiber) -> list[Listener]:

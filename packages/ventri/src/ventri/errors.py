@@ -17,6 +17,14 @@ class PluginError(KernelError):
     """A plugin's apply/start raised; the original error is ``__cause__``."""
 
 
+class LoadTimeout(PluginError):
+    """A plugin's apply/start did not finish within its load timeout."""
+
+    def __init__(self, message: str, timeout: float) -> None:
+        super().__init__(message)
+        self.timeout = timeout
+
+
 class TransactionError(KernelError):
     """A transaction could not be committed and was rolled back."""
 

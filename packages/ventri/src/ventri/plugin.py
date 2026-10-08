@@ -196,20 +196,24 @@ def _provides(value: Any) -> tuple[dict[str, Any], tuple]:
     return {}, keys
 
 
-_cache: weakref.WeakKeyDictionary[Any, PluginSpec] = weakref.WeakKeyDictionary()
+_META = ("name", "inject", "Config", "provides", "timeout", "retry", "exclusive")
+_cache: weakref.WeakKeyDictionary[Any, tuple[tuple, PluginSpec]] = weakref.WeakKeyDictionary()
 
 
 def describe(target: Any) -> PluginSpec:
+    """PluginSpec for ``target`` (cached; re-derived if a metadata attribute changed)."""
+    meta = tuple(getattr(target, a, MISSING) for a in _META)
     try:
-        spec = _cache.get(target)
+        hit = _cache.get(target)
     except TypeError:  # unhashable / not weak-referenceable
         return _describe(target)
-    if spec is None:
-        spec = _describe(target)
-        try:
-            _cache[target] = spec
-        except TypeError:
-            pass
+    if hit is not None and len(hit[0]) == len(meta) and all(a is b for a, b in zip(hit[0], meta)):
+        return hit[1]
+    spec = _describe(target)
+    try:
+        _cache[target] = (meta, spec)
+    except TypeError:
+        pass
     return spec
 
 

@@ -4,6 +4,7 @@ transactional plugin changes, stable observability. Only asyncio is supported
 from .context import Context
 from .errors import (
     KernelError,
+    LoadTimeout,
     PluginError,
     ServiceConflict,
     ServiceNotFound,
@@ -14,7 +15,7 @@ from .errors import (
 )
 from .fiber import Fiber, State, TaskHandle
 from .kernel import Binding, Kernel, Realm, TraceEvent
-from .plugin import plugin
+from .plugin import Retry, plugin
 from .transaction import Transaction
 
 __version__ = "0.2.0a1"
@@ -25,8 +26,10 @@ __all__ = [
     "Fiber",
     "Kernel",
     "KernelError",
+    "LoadTimeout",
     "PluginError",
     "Realm",
+    "Retry",
     "ServiceConflict",
     "ServiceNotFound",
     "State",

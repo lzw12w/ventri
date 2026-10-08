@@ -20,7 +20,8 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
-from .plugin import PluginSpec, describe
+from .errors import LoadTimeout
+from .plugin import MISSING, PluginSpec, Retry, describe
 
 if TYPE_CHECKING:  # pragma: no cover
     from .context import Context
@@ -105,7 +106,8 @@ class Fiber:
     def __init__(self, kernel: Kernel, parent: Fiber | None, plugin: Any,
                  config: Any = None, *, tx: Transaction | None = None,
                  ctx: Context | None = None, scope: bool = False,
-                 isolate: frozenset = frozenset(), meta: dict | None = None) -> None:
+                 isolate: frozenset = frozenset(), meta: dict | None = None,
+                 timeout: Any = MISSING, retry: Any = MISSING) -> None:
         from .context import Context
 
         self.kernel = kernel
@@ -136,6 +138,11 @@ class Fiber:
             self.scope_chain = parent.scope_chain | {self} if scope else parent.scope_chain
         self._realm_cache: dict[Any, Realm] = {}
         self._txlock: Any = None  # scope fibers: transaction lock (created lazily)
+        self._timeout = timeout   # per-fiber override of the load timeout
+        self._retry = retry if retry is MISSING else Retry.coerce(retry)
+        self._failures = 0        # current failure streak (retry policy)
+        self._retry_gen = 0       # bumps invalidate scheduled retries
+        self._active_since: float | None = None
         self._bindings: list[Binding] = []  # live/staged bindings this fiber provides
         self._tx = tx
         self._effects: list[Effect] = []
@@ -173,6 +180,24 @@ class Fiber:
     def deps(self) -> tuple:
         """Required + optional keys; a change in any of their bindings restarts the fiber."""
         return self.spec.deps if self.spec else ()
+
+    @property
+    def load_timeout(self) -> float | None:
+        """Effective load timeout: per-fiber override, else plugin metadata, else the
+        kernel default (``Kernel(load_timeout=30)``). ``None`` disables it."""
+        if self._timeout is not MISSING:
+            return self._timeout
+        if self.spec is not None and self.spec.timeout is not MISSING:
+            return self.spec.timeout
+        return self.kernel.load_timeout
+
+    @property
+    def retry_policy(self) -> Retry | None:
+        if self._retry is not MISSING:
+            return self._retry
+        if self.spec is not None and self.spec.retry is not None:
+            return self.spec.retry
+        return self.kernel.retry
 
     @property
     def scope(self) -> Fiber:
@@ -321,8 +346,11 @@ class Fiber:
             self._snapshot, self.error = snapshot, None
             self._set_state(State.LOADING)
             ok, err = False, None
+            timeout = self.load_timeout
+            scope = anyio.CancelScope(
+                deadline=anyio.current_time() + timeout if timeout is not None else float("inf"))
             try:
-                with anyio.CancelScope() as scope:
+                with scope:
                     self._load_scope = scope
                     await self._open_scope()
                     await self._apply()
@@ -332,18 +360,46 @@ class Fiber:
             finally:
                 # Runs on success, error, own cancellation *and* outer cancellation.
                 self._load_scope = None
+                if not ok and err is None and scope.cancelled_caught and not self._dispose_requested:
+                    err = LoadTimeout(f"{self.label} did not load within {timeout}s", timeout or 0)
                 if not ok or self._dispose_requested:
                     await self._teardown()
                     if self._dispose_requested:
                         self._finalize_dispose()
                     elif err is not None:
-                        self.error = err
-                        self._set_state(State.FAILED, error=repr(err))
+                        self._failed(err)
                     else:  # cancelled from outside: nothing leaked, may retry later
                         self._set_state(State.PENDING, reason="cancelled")
             if self.state is State.LOADING:
                 self._set_state(State.ACTIVE)
+                self._active_since = anyio.current_time()
             return True
+
+    def _failed(self, error: BaseException) -> None:
+        """Enter FAILED and, if a retry policy applies, schedule a restart."""
+        self.error = error
+        self._set_state(State.FAILED, error=repr(error))
+        policy = self.retry_policy
+        if policy is None or self.tx is not None or self._dispose_requested:
+            return
+        now = anyio.current_time()
+        if self._active_since is not None and now - self._active_since >= policy.reset_after:
+            self._failures = 0
+        self._active_since = None
+        self._failures += 1
+        self._retry_gen += 1
+        if self._failures > policy.max:
+            self.kernel._trace("fiber.retry", self, attempt=self._failures, gave_up=True)
+            return
+        self.kernel._schedule_retry(self, policy.delay(self._failures), self._retry_gen)
+
+    async def _retry_now(self, gen: int) -> None:
+        if self.state is not State.FAILED or gen != self._retry_gen or self._dispose_requested:
+            return
+        self.kernel._trace("fiber.retry", self, attempt=self._failures)
+        self.error = None
+        self._set_state(State.PENDING, reason="retry")
+        await self._activate()
 
     async def _teardown(self) -> None:
         with anyio.CancelScope(shield=True):
@@ -404,8 +460,7 @@ class Fiber:
                 if self._dispose_requested:
                     self._finalize_dispose()
                 else:
-                    self.error = error
-                    self._set_state(State.FAILED, error=repr(error))
+                    self._failed(error)
 
     # ------------------------------------------------------------ public API
     async def dispose(self) -> None:
@@ -414,7 +469,9 @@ class Fiber:
             await self._dispose()
 
     async def restart(self) -> None:
-        """Re-run apply (also recovers a FAILED fiber)."""
+        """Re-run apply (also recovers a FAILED fiber; resets the retry streak)."""
+        self._failures = 0
+        self._retry_gen += 1
         async with self.kernel._op(self.tx):
             await self._deactivate()
             if self.state is State.FAILED:

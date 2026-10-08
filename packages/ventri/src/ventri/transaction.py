@@ -235,10 +235,12 @@ class Transaction:
             p = p.parent
         return False
 
-    async def _stage(self, parent: Fiber, plugin: Any, config: Any) -> Fiber:
+    async def _stage(self, parent: Fiber, plugin: Any, config: Any, **opts: Any) -> Fiber:
         if parent is not self.scope and not self._in_scope(parent):
             raise TransactionError(f"{parent!r} is outside the transaction's scope {self.scope!r}")
-        f = Fiber(self.kernel, parent, plugin, config, tx=self)
+        if parent.state is State.DISPOSED or parent in self._removed():
+            raise TransactionError(f"cannot stage under {parent!r}")
+        f = Fiber(self.kernel, parent, plugin, config, tx=self, **opts)
         self._staged.append(f)
         async with self.kernel._op(self):
             await f._activate()
@@ -246,10 +248,23 @@ class Transaction:
             raise PluginError(f"{f.label} failed: {f.error!r}") from f.error
         return f
 
-    async def plugin(self, plugin: Any, config: Any = None) -> Fiber:
-        """Stage a new plugin under the transaction's context."""
+    async def plugin(self, plugin: Any, config: Any = None, *, parent: Fiber | None = None,
+                     meta: dict | None = None, timeout: Any = _MISSING,
+                     retry: Any = _MISSING) -> Fiber:
+        """Stage a new plugin under the transaction's context (or under ``parent``, a
+        live or staged fiber inside the transaction's scope)."""
         self._check()
-        return await self._stage(self.ctx.fiber, plugin, config)
+        return await self._stage(parent or self.ctx.fiber, plugin, config, meta=meta,
+                                 timeout=timeout, retry=retry)
+
+    async def scope(self, name: str, isolate: Any = (), *, parent: Fiber | None = None,
+                    meta: dict | None = None) -> Fiber:
+        """Stage a new scope (see ``Context.scope``)."""
+        from .context import ScopePlugin
+
+        self._check()
+        return await self._stage(parent or self.ctx.fiber, ScopePlugin(name), None, scope=True,
+                                 isolate=frozenset(isolate), meta=meta)
 
     async def dispose(self, fiber: Fiber) -> None:
         """Stage removal of a live fiber (it keeps running until commit)."""
@@ -275,16 +290,21 @@ class Transaction:
                         self._overlay[rk] = None
                         k._mark_dirty(realm, self)
 
-    async def replace(self, fiber: Fiber, plugin: Any = _MISSING, config: Any = _MISSING) -> Fiber:
-        """Stage ``fiber`` -> new fiber with new plugin and/or config, same parent."""
+    async def replace(self, fiber: Fiber, plugin: Any = _MISSING, config: Any = _MISSING, *,
+                      timeout: Any = _MISSING, retry: Any = _MISSING) -> Fiber:
+        """Stage ``fiber`` -> new fiber with new plugin and/or config, same parent.
+        The new fiber inherits ``meta`` and the timeout / retry overrides unless given."""
         self._check()
         plugin = fiber.plugin if plugin is _MISSING else plugin
         config = fiber.raw_config if config is _MISSING else config
+        timeout = fiber._timeout if timeout is _MISSING else timeout
+        retry = fiber._retry if retry is _MISSING else retry
         parent = fiber.parent
         if parent is None:
             raise TransactionError("cannot replace the root fiber")
         await self.dispose(fiber)
-        new = await self._stage(parent, plugin, config)
+        new = await self._stage(parent, plugin, config, meta=dict(fiber.meta), timeout=timeout,
+                                retry=retry)
         if fiber.tx is None:
             self._replaces[new] = fiber
         return new
