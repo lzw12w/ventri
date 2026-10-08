@@ -1,144 +1,216 @@
-# Ventri —— 受 cordis 启发的 Python 插件内核原型
+# Ventri —— 受 cordis 启发的 Python 插件内核
 
 **Ventri** 取自拉丁语 *ventriculus*（心室）。cordis 意为“心脏”，而心室负责把血液泵向全身——
 Ventri 就是那个“泵”：驱动插件的加载、运行与更替。
 
-Ventri 是一个小而可运行的插件内核（库代码约 1000 行有效代码），用来验证两个创新点：
+Ventri 是一个插件内核，核心创新有两点：
 
-- **(A) 结构化并发**：基于 `anyio`，每个插件（Fiber）拥有自己的 task group，任务树与插件树一一对应；
+- **(A) 结构化并发**：基于 `anyio`（只跑在 asyncio 上），每个插件（Fiber）拥有自己的任务、监听器、服务与清理 effect，
+  卸载时按确定顺序取消并等待结束，不泄漏；
 - **(B) 事务化插件变更**：`async with ctx.transaction()` 批量加载/卸载/替换/重配置插件，失败整体回滚，其他插件看不到“半应用”状态。
 
-设计为原创实现（只借鉴 cordis 的语义：Context / 服务 / inject / Fiber 生命周期 / effect），未参考任何现有 Python 移植。
-后续计划作为 DeepSeek 个人 Agent 的底座。
+在此之上，**M1（内核 Alpha，0.2.0a1）** 加入了：作用域（scope / realm）与会话隔离、声明式 YAML 配置（diff 后单事务热应用）、
+stop-first 替换、dry-run 事务与 `TxReport`、加载超时与重试、依赖环/缺失提供者诊断、签名注入与 `ventri stubgen`、
+`Secret[T]`、事件优先级/类型化事件/拦截器、trace schema v1 与 JSONL sink。
 
-> **项目路线与完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。** 许可证：MIT（见 [`LICENSE`](LICENSE)）。
+设计为原创实现（只借鉴 cordis 的语义），后续作为 DeepSeek 个人 Agent 的底座。
+
+> **项目路线与完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)；API 参考见 [`docs/api.md`](docs/api.md)。**
+> 许可证：MIT（见 [`LICENSE`](LICENSE)）。要求 Python 3.12+；1.0 只面向 macOS，但内核代码与平台无关（Linux 上同样测试）。
 
 ## 快速开始
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install anyio pytest
-.venv/bin/python -m pytest -q          # 只在 asyncio 上运行（Ventri 只支持 asyncio）
-.venv/bin/python examples/demo.py
+uv sync                                   # 创建 .venv，安装 ventri + ventri-std（workspace）与开发依赖
+uv run pytest -q                          # 只在 asyncio 上运行
+uv run ruff check .
+uv run python examples/demo.py
+uv run python benchmarks/bench_kernel.py  # DESIGN 4.13 性能目标
 ```
 
 ```python
+from typing import Annotated
 from ventri import Kernel, plugin
 
 class LLM: ...
 
-@plugin(name="tool", inject=[LLM])
-def tool(ctx, config):
-    llm = ctx.get(LLM)                       # 类型化访问
-    ctx.on("tool:call", lambda q: ...)       # 监听器：fiber 卸载时自动移除
-    ctx.spawn(background_job)                # 后台任务：fiber 卸载时取消并等待结束
+@plugin(provides={"llm": LLM}, timeout=10)
+async def deepseek(ctx, config):
+    ctx.provide(LLM, LLM())                  # provides 里声明了名字 -> 也可写 ctx.llm
+
+def tool(ctx, config, llm: LLM, cache: Annotated[object, "cache"] | None = None):
+    # 签名即依赖：llm 必需；cache 可选（出现/消失会重启 tool）
+    ctx.on("tool:call", lambda q: ..., priority=10)   # 监听器：高优先级先执行；fiber 卸载时自动移除
+    ctx.spawn(background_job)                         # 后台任务：fiber 卸载时取消并等待结束
 
 async with Kernel() as app:
-    t = await app.plugin(tool)               # 缺少 LLM -> PENDING
-    await app.plugin(llm_plugin, {...})      # LLM 出现 -> tool 自动 ACTIVE
-    async with app.transaction() as tx:      # 原子变更
+    t = await app.plugin(tool)               # 缺少 LLM -> PENDING，pending_reason="missing: LLM (...)"
+    await app.plugin(deepseek)               # LLM 出现 -> tool 自动 ACTIVE
+    async with app.transaction(reason="upgrade") as tx:   # 原子变更
         await tx.replace(llm_fiber, config={...})
         await tx.plugin(other)
+    print(tx.report)                         # TxReport：增删改、重启、服务变化、失败原因
+    session = await app.scope("session:a1", isolate=["memory"])   # 会话作用域
+    await session.ctx.plugin(memory_plugin)  # 只在本会话可见；session.dispose() 全部回收
     print(app.tree())
 ```
 
-## 文件结构
+## 仓库结构（uv workspace）
 
-| 文件 | 内容 |
+| 路径 | 内容 |
 |---|---|
-| `ventri/kernel.py` | `Kernel`（根 Context）、服务注册表、reconcile 循环、事件分发、trace |
-| `ventri/fiber.py` | `Fiber` 生命周期状态机、per-fiber 锁、task group 宿主任务、effect 栈、`spawn` |
-| `ventri/context.py` | 插件看到的 API：`plugin/provide/get/on/effect/enter/spawn/emit/.../transaction/replace` |
-| `ventri/transaction.py` | 事务：暂存（staging）、提交校验、原子交换、回滚 |
-| `ventri/observe.py` | `snapshot()` / `tree()` |
-| `ventri/plugin.py` | 插件描述（函数或类、`inject`、`Config`）与 `@plugin` 装饰器 |
-| `tests/` | 24 个测试（asyncio） |
-| `examples/demo.py` | 假 LLM 服务 + 工具插件 + 后台任务 + 失败事务回滚 |
+| `packages/ventri/src/ventri/` | **L0 内核**（只依赖 `anyio`） |
+| &nbsp;&nbsp;`kernel.py` | `Kernel`（根 Context）、realm 注册表、reconcile、事件分发、trace |
+| &nbsp;&nbsp;`fiber.py` | `Fiber` 状态机、per-fiber 锁、effect 栈、`spawn`、加载超时与重试 |
+| &nbsp;&nbsp;`context.py` | 插件 API：`plugin/scope/provide/get/on/intercept/check/effect/enter/spawn/emit/.../transaction/replace/trace` |
+| &nbsp;&nbsp;`transaction.py` / `report.py` | 事务：作用域锁、暂存、stop-first、dry-run、probe、校验、原子交换、回滚；`TxReport` |
+| &nbsp;&nbsp;`plugin.py` | 插件描述：签名注入、`provides`、`Config`、`timeout`、`Retry`、`exclusive`；`@plugin` |
+| &nbsp;&nbsp;`diagnose.py` | 依赖诊断（Tarjan SCC 找环、缺失/失败提供者） |
+| &nbsp;&nbsp;`events.py` / `secret.py` / `trace.py` / `observe.py` | `Event[T]`/`Deny`/`Rewrite`；`Secret[T]` 与打码；trace schema v1；`snapshot()`/`tree()` |
+| `packages/ventri-std/src/ventri_std/` | **L1 标准插件**：`config.py`（声明式配置加载器）、`trace.py`（JSONL sink）、`stubgen.py`、`cli.py`（`ventri` 命令） |
+| `tests/` | 内核测试；`tests/std/` 为 ventri-std 测试；含 hypothesis 属性测试与混沌测试 |
+| `benchmarks/bench_kernel.py` | 4.13 性能目标基准（结果见 [`docs/benchmarks.md`](docs/benchmarks.md)） |
+| `docs/` | `DESIGN.md`、`api.md`、`trace-schema.md`（+ JSON Schema）、`benchmarks.md` |
 
 ## 架构
 
-- **Context**：每个 Fiber 一个 Context（`ctx.parent` 可向上走）；`Kernel` 本身就是根 Context。
-- **插件**：函数 `fn(ctx, config)`（可 async）或类 `Cls(ctx, config)`（可选 `start()` / `stop()`）。
-  元数据取自属性：`name`、`inject`（类或字符串 key 列表）、`Config`（若存在且 config 为 dict，则 `Config(**config)`）。
-- **服务**：`ctx.provide(key, value, name=None)`，key 是类或字符串；同一 key 只能有一个提供者（否则 `ServiceConflict`）。
-  `ctx.get(Type) -> Type` 类型化访问；字符串 key 或带 `name=` 的服务支持 `ctx.<name>` 属性访问。
-  服务的生命周期 = 提供它的 Fiber 的生命周期（作为 effect 注册）。
-- **Fiber 状态机**：`PENDING → LOADING → ACTIVE → UNLOADING → PENDING | DISPOSED`，加载失败为 `FAILED`。
-  - inject 依赖不全时停在 `PENDING`；依赖到齐自动加载；依赖消失自动 `ACTIVE → PENDING`，再出现自动恢复。
-  - **依赖方先拆、服务后删**：移除服务前先把依赖它的插件卸载，所以依赖方在自己的清理代码里仍可使用该服务。
-  - **per-fiber 一致视图**：`ctx.get` 对已 inject 的 key 返回该 fiber 激活时绑定的实例，直到它重启。
-- **Reconciler**：每个公开操作（`plugin`/`dispose`/`restart`/事务操作）可以嵌套；最外层操作结束时跑一次
-  不动点循环：先停掉依赖已失效的 ACTIVE fiber（深/新者优先），再按树序激活依赖已满足的 PENDING fiber。
-  在任何操作之外直接调用 `provide`（如在后台任务里）会在后台调度一次 reconcile；需要确定性时 `await app.settle()`。
-- **事件**：`emit`（顺序、错误隔离）、`parallel`（并发、错误隔离）、`serial`（顺序、返回首个非 None、错误上抛）、
-  `bail`（同步版 serial）。监听器随 fiber 自动清理。
+- **Context**：每个 Fiber 一个 Context；`Kernel` 本身就是根 Context。
+- **插件**：函数 `fn(ctx, config, *deps)`（可 async）或类 `Cls(ctx, config, *deps)`（可选 `start()` / `stop()`）。
+  元数据：`name`、`provides`（`{"llm": ModelProvider}` 或 key 列表，用于诊断与 stubgen）、`Config`、`timeout`、`retry`、`exclusive`，
+  或旧式 `inject=[...]`。
+- **签名注入**：`(ctx, config)` 之后的参数即依赖：`llm: LLM` 必需；`x: X | None = None` 可选（出现/消失会重启插件）；
+  `Annotated[T, "key"]` 用字符串 key；其他带默认值的参数不注入；无注解无默认值报 `TypeError`。
+- **服务**：`ctx.provide(key, value)`，key 是类或字符串；同一 realm 内同一 key 只能有一个提供者（`ServiceConflict`）。
+  `ctx.get(Type) -> Type` 类型化访问；字符串 key、`name=` 或 `provides` 里声明了名字的服务支持 `ctx.<name>`。
+  服务的生命周期 = 提供它的 Fiber 的生命周期。
+- **Fiber 状态机**：`PENDING → LOADING → ACTIVE → UNLOADING → PENDING | DISPOSED`，加载失败/超时为 `FAILED`。
+  依赖不全停在 `PENDING`（并给出 `pending_reason`）；依赖到齐自动加载；依赖消失自动 `ACTIVE → PENDING`。
+  **依赖方先拆、服务后删**；**per-fiber 一致视图**（`ctx.get` 对已注入的 key 返回激活时绑定的实例）。
+- **Reconciler**：最外层公开操作结束时，只对“脏”区域（被改动的 realm 所覆盖的子树）跑不动点循环。
+
+### 作用域与隔离（M1）
+
+`await ctx.scope("session:a1", isolate=["memory", WorkingMemory])` 创建一个作用域 fiber：
+
+- **realm**：scope 内对 `isolate` 列出的 key 的 `provide/get` 使用 scope 自己的 realm；其余 key 解析到最近的、隔离了它的祖先 realm，
+  否则根 realm（**不会向外回退**：在 scope 中隔离的 key 若 scope 内没有提供者，即视为缺失）。兄弟 scope 互不可见。
+- **事件过滤**：在 scope S 内发出的事件只投递给 S 子树与 S 的祖先链上的监听器，不投递给兄弟 scope；根上发出的事件投递给所有人。
+- **回收**：`await scope.dispose()` 确定性地回收其中所有 fiber、任务、监听器、服务；回收后 `snapshot()` 回到基线（测试断言）。
+- **事务锁细化**：每个 scope 一把 FIFO 读写锁；事务对自己的 scope 取写锁、对祖先取读锁（从根开始），
+  因此不同会话的事务可以并发，根事务与会话事务互斥。`wait=False` 时立即 `TransactionBusy`。
+
+### 事件（M1）
+
+- 四种分发：`emit`（顺序、错误隔离）、`parallel`（并发、错误隔离）、`serial`（顺序、返回首个非 None、错误上抛）、`bail`（同步版 serial）。
+- `priority`：高者先，同优先级按注册序；所有分发模式一致。
+- **类型化事件**：`MessageIn = Event[ChannelMessage]("message.in")`，`ctx.on(MessageIn, handler)` 的 handler 参数有类型；字符串事件名保留。
+- **拦截器**：`ctx.intercept(ToolCall, fn)`，`await ctx.check(ToolCall, call)` 按优先级执行：返回 `Deny(reason)` 立即拒绝，
+  `Rewrite(new)` 替换值并继续，`None` 放行；拦截器抛错向上传播（fail closed）。
 
 ## (A) 结构化并发
 
-1. `Kernel` 持有根 task group。Fiber 激活时，在**父 fiber 的 task group** 中启动一个宿主任务，宿主任务内开自己的 task group；
-   `ctx.spawn` 的任务都在这里。于是任务树 = 插件树，关闭 Kernel 会取消一切。
-2. 每个 spawn 的任务有独立 `CancelScope`，并作为 effect 压入 LIFO 栈：卸载时**取消并等待其结束**，与其他 effect 严格按逆序交错执行。
-3. **确定的拆除顺序**：子 fiber（新→旧，递归）→ 本 fiber 的 effect（LIFO：监听器、服务、任务、用户 disposer）→ 关闭 task group 兜底。
+1. `Kernel` 持有根 task group；`ctx.spawn` 的任务在其中运行，但**归属**于所属 fiber：每个任务有独立 `CancelScope`，
+   并作为 effect 压入该 fiber 的 LIFO 栈：卸载时**取消并等待其结束**，与其他 effect 严格按逆序交错执行。关闭 Kernel 会取消一切。
+   （M0 中每个 fiber 还有一个 task group 宿主任务作兜底；M1 去掉了它——任务本来就由 effect 拥有——空 fiber 内存从 ~10 KB 降到 ~3.4 KB。）
+2. **确定的拆除顺序**：子 fiber（新→旧，递归）→ 本 fiber 的 effect（LIFO：监听器、服务、任务、用户 disposer）。
    拆除过程被 shield，不会被外部取消打断；清理异常只记录到 trace，不中断后续清理。
-4. **任务异常的归属**：spawn 任务抛异常 → 所属 fiber 被拆除并置为 `FAILED`（类似 supervisor），兄弟插件和 Kernel 不受影响。
-5. **重入安全**（每个 fiber 一把锁，记录持锁任务）：
-   - 加载中被另一任务 `dispose`：取消加载用的 CancelScope → 等锁 → 加载方展开时清理已注册的 effect → `DISPOSED`；
-   - 插件在自己的 apply 里 dispose 自己（或子插件 dispose 正在加载的父插件）：检测到持锁者是当前任务，只做标记+取消，由持锁者收尾，不会死锁；
-   - 在自己 spawn 的任务里 dispose 自己：不等待自身所在的 task group 退出，避免自等待死锁。
-6. **取消即不泄漏**：调用 `await ctx.plugin(...)` 的任务若被取消，正在加载的 fiber 会被完整拆除并 `DISPOSED`
-   （服务、监听器、任务、子插件都不残留——见 `test_cancellation_mid_load_leaks_nothing`）。
+3. **任务异常的归属**：spawn 任务抛异常 → 所属 fiber 被拆除并置为 `FAILED`（supervisor 语义），兄弟插件和 Kernel 不受影响。
+4. **重入安全**（每个 fiber 一把锁，记录持锁任务）：加载中被 dispose、在 apply 里 dispose 自己、在自己的任务里 dispose 自己都不会死锁。
+5. **取消即不泄漏**：调用 `await ctx.plugin(...)` 的任务被取消时，正在加载的 fiber 被完整拆除并 `DISPOSED`。
+6. **加载超时**（M1）：插件元数据 `timeout`（默认 30 s，`Kernel(load_timeout=)`/配置可覆盖，`None` 关闭）；超时取消 apply →
+   清理 → `FAILED(LoadTimeout)`。只覆盖加载，不覆盖运行期任务。
+7. **重试策略**（M1）：`Retry(max, backoff="exp"|"fixed", base, cap, reset_after)`；默认不重试；staged fiber 不重试；
+   dispose 取消已排期的重试；`restart()` 重置计数。
 
 ## (B) 事务化插件变更
 
-采用 **蓝绿暂存（blue/green staging）**，而不是“先改再补偿”：
+采用 **蓝绿暂存（blue/green staging）**：
 
-- `tx.plugin` / `tx.replace` 创建 **staged fiber**，它们真实运行（apply、spawn、监听），
-  但其服务写入事务私有的 **overlay**，只有同一事务内的 staged fiber 可见；它们的监听器只接收事务内部发出的事件。
-- `tx.dispose` / `tx.replace` **不会停止旧 fiber**，只在 overlay 中为其服务打“墓碑”，让 staged fiber 看不到；外部世界继续使用旧 fiber。
-- **提交**：
-  1. 结算 staged fiber（可能此时才满足依赖并加载）；任一 `FAILED`（或 `strict=True` 时未 ACTIVE）→ 回滚；
-  2. 对 live 注册表做乐观校验（事务期间有外部插件抢占了同一 key → `TransactionConflict` → 回滚）；
-  3. **在一个同步步骤内（中间没有 await）把 overlay 应用到 live 注册表** —— 不可回头点；
-  4. 重启绑定已变化的 live 依赖方（旧实例此时仍存活，依赖方清理时看到的是旧实例），然后拆除被移除/被替换的旧 fiber，再 reconcile。
-- **回滚**：按逆序 dispose 所有 staged fiber（执行它们的清理），丢弃 overlay。被“移除/替换”的旧 fiber 从未停止，
-  因此无需“恢复”——保留原 config、原实例和内存状态（比“重启旧插件”更强）。
-- `ctx.replace(fiber, new_plugin_or_config)` = 单操作事务；位置参数可调用视为新插件，否则视为新 config。
+- `tx.plugin` / `tx.replace` 创建 **staged fiber**，真实运行，但其服务写入事务私有的 **overlay**（按 `(realm, key)`），
+  只有同一事务内的 staged fiber 可见；它们的监听器只接收事务内部发出的事件。
+- `tx.dispose` / `tx.replace` **不会停止旧 fiber**，只在 overlay 中打“墓碑”。
+- **提交**：结算 staged fiber → 校验（`FAILED`、`strict` 下未 ACTIVE、事务作用域或 staged fiber 在事务期间被外部回收、外部抢占同一 key）
+  → **在一个同步步骤内把 overlay 应用到 live 注册表** → 重启绑定已变化的 live 依赖方 → 拆除被移除/替换的旧 fiber → reconcile。
+- **回滚**：逆序 dispose 所有 staged fiber，丢弃 overlay；旧 fiber 从未停止，保留原 config、原实例和内存状态。
+- **stop-first 替换**（M1）：`exclusive=True` 的插件（如独占端口）默认用 `strategy="stop-first"`：新 fiber 停放到提交时，
+  先停旧实例再启动新实例；新实例失败则以原 config 重启旧实例——**降级回滚**（配置与服务拓扑恢复，旧实例内存状态不保留，
+  依赖方会观察到短暂空窗；`TxReport.degraded=True`）。
+- **dry-run**（M1）：`transaction(dry_run=True, probe=...)` 执行一切到提交前（加载、结算、校验、probe），然后总是回滚；
+  `tx.get()` 返回事务视角的服务，可用于 probe。stop-first 替换在 dry-run 中不启动（记入 `skipped`）。
+- **元数据与超时**（M1）：`transaction(origin=, reason=, timeout=)`，写入 trace；超时回滚并抛 `TransactionTimeout`。
+- **诊断**（M1）：每轮 reconcile 后对 PENDING fiber 做 Tarjan SCC；环上的 fiber 得到 `pending_reason="cycle: a#1 → b#2 → a#1"` 并发出
+  `dep.cycle`；`strict=True` 的事务因环失败时抛 `DependencyCycle`。
 
 ### 精确的保证
 
 | # | 保证 |
 |---|---|
-| G1 原子性 | live 注册表从“事务前”到“事务后”只在一个同步步骤内切换；任何观察者（其他插件、`ctx.get`、trace 回调）只能看到全部或全无。测试中用 trace 回调在每个事件上断言 `LLM` 服务始终存在。 |
+| G1 原子性 | live 注册表从“事务前”到“事务后”只在一个同步步骤内切换；任何观察者只能看到全部或全无。 |
 | G2 隔离性 | 提交前：staged 服务对 live fiber 不可见；staged 监听器听不到外部事件；被移除/替换的 fiber 照常运行。 |
-| G3 回滚 | apply 抛错、块内用户代码抛错、事务被取消、提交前校验失败——都会回滚，回滚后 `app.snapshot()` 与事务前**完全相等**（测试断言）。 |
-| G4 串行化 | 每个 Kernel 同时只有一个事务：`wait=True` 排队（先到先得），`wait=False` 立即 `TransactionBusy`；嵌套事务直接报错。 |
-| G5 冲突检测 | 事务期间允许非事务操作，但若它们与 overlay 冲突，提交时检测出并回滚。 |
+| G3 回滚 | apply 抛错、块内代码抛错、事务被取消/超时、提交前校验失败——都会回滚，回滚后 `app.snapshot()` 与事务前**完全相等**（属性测试断言）。 |
+| G4 串行化 | 同一 scope 上的事务串行（FIFO）；不同会话 scope 的事务可并发；祖先 scope 的事务与子 scope 的事务互斥；嵌套事务报错。 |
+| G5 冲突检测 | 事务期间允许非事务操作，若与 overlay 冲突（或回收了事务的 scope / staged fiber），提交时检测出并回滚。 |
 
-**不保证的内容**：
-- staged 插件对外部世界的副作用（网络请求、写文件、后台任务做的事）不会被撤销，只会运行其清理 effect；
-- 不可回头点之后的失败（依赖方重启失败、旧 fiber 清理抛错）不会回滚，表现为 `FAILED` fiber + trace 事件；
-- 蓝绿模式要求新旧实例能短暂共存（例如独占端口的插件需要 “stop-first” 策略，尚未实现）；
-- live 依赖方在交换后会经历短暂重启（UNLOADING→PENDING→LOADING），期间不服务；但它们**不会观察到服务缺失**。
+**不保证的内容**：staged 插件对外部世界的副作用不会被撤销；不可回头点之后的失败不回滚（表现为 `FAILED` + trace）；
+蓝绿模式要求新旧实例能短暂共存（否则用 stop-first，其回滚是降级的）；live 依赖方在交换后会短暂重启。
+
+## 声明式配置（ventri-std）
+
+```yaml
+# ~/.ventri/ventri.yml
+version: 1
+profiles: [home]                 # 叠加 profiles/home.yml 的有序补丁
+plugins:
+  - use: ventri_std.trace.jsonl
+    config: { path: ~/.ventri/trace/, rotate_mb: 64 }
+  - use: mypkg.providers.deepseek
+    id: ds
+    config: { api_key: "${secret:deepseek}", model: deepseek-flash }   # 钥匙串，或 $VENTRI_SECRET_DEEPSEEK
+  - group: tools
+    plugins:
+      - use: mypkg.tools.fs
+        config: { roots: [~/notes] }
+```
+
+- 流程：读 YAML → 合并 profiles（`{id, config}` 深合并 / `disabled` / `add`（可 `under` 某 group）/ `remove`）→ 解析 secrets
+  （`${secret:x}` → `Secret`；`${env:X}`、`${env:X:-默认}`）→ 解析 `use`（entry point `ventri.plugins`、`mod:attr`、点路径）→
+  按插件 `Config` 校验（**收集全部错误**，任何事务开始前抛 `ConfigError`）→ 按稳定 id diff → **一个事务**（`origin="config"`）。
+- **稳定 id**：显式 `id`，否则为 `use`（同一父节点下第 n 个相同 `use` 记为 `use@n`）；group 用其名字。
+- **diff**：缺失或 `disabled` 的条目被卸载；`use`、校验后的 config、`timeout`、`retry` 变化或处于 `FAILED` 的条目被替换；新条目被加载。
+  config 比较基于**校验后的模型**，格式变化或写出默认值不会触发重启。
+- 失败 → 回滚，**旧配置继续服务**，`ApplyResult` 指出失败的 fiber 与原因；文件监视（轮询 + 300 ms 去抖：一次保存 = 一个事务）。
+- secrets 永不进入快照/trace/报告：`Secret[T]` 类型 + 键名模式（`*key*`、`*token*`、`*secret*`、`*password*`）双重打码。
+
+## `ventri` 命令
+
+```bash
+ventri apply --dry-run [ventri.yml] [--profile work] [--strict] [--json]   # 打印 plan 与 TxReport，不生效
+ventri apply --validate-only                # 只解析/校验，不实例化任何插件
+ventri tree                                 # 配置产生的插件树（dry-run 中的 staged 树）
+ventri doctor                               # 环境、配置、secrets、插件解析、会停在 PENDING/失败的插件
+ventri run                                  # 前台托管配置，编辑文件即热应用
+ventri stubgen [-m mypkg.plugins] [--out .] # 生成 ventri_stubs.pyi：class Ctx(Context): llm: ModelProvider
+```
+
+M1 没有守护进程控制通道，所以 `ventri apply` 不带 `--dry-run` 会报错退出；`apply/tree/doctor` 在一次性 Kernel 中以 dry-run
+事务执行（插件会被实例化并拆除；`--validate-only` 不会）。
 
 ## 可观测性
 
-- `app.tree()`：树形文本（状态、staged 标记、config（敏感字段打码）、inject、provides、任务数、错误）+ 服务表；
-- `app.snapshot()`：同样信息的 dict，可直接比较；
-- `app.on_trace(cb)` / `app.trace_log`：`fiber.state`、`service.bind/unbind`、`task.spawn/error`、`effect.error`、`event.error`、`tx.begin/commit/rollback` 等事件。
+- `app.tree()` / `app.snapshot()`：状态、配置 id、staged 标记、config（打码）、依赖、provides、任务数、错误、`pending_reason`、scope 与 realm；
+- trace：`app.on_trace(cb)` / `app.trace_log`（环形缓冲）；`event.to_dict()` 为 **schema v1**
+  `{v, seq, ts, kind, fiber, scope, tx, attrs}`（见 [`docs/trace-schema.md`](docs/trace-schema.md)）；上层用 `ctx.trace("agent.turn", ...)` 发自定义事件；
+- `use: ventri_std.trace.jsonl`：缓冲写入、按大小轮转、只保留最新 N 个文件、回填加载前的环形缓冲。
 
 ## 测试
 
-`pytest` + anyio 插件，只在 **asyncio** 上运行（Ventri 只支持 asyncio；`anyio` 仅作内部依赖，提供 task group / CancelScope 等结构化并发原语）。覆盖：inject 挂起→激活、服务移除自动卸载与恢复、级联拆除顺序、
-spawn 任务随卸载取消、Kernel 关闭取消所有任务、任务崩溃只影响所属 fiber、加载中 dispose、自我 dispose、取消加载不泄漏、
-类型化访问/冲突、事件四种模式、快照/trace、事务提交与隔离、apply 抛错回滚、用户代码抛错回滚、提交期失败/strict 回滚、
-replace 成功与回滚（含替换失败的 FAILED fiber）、并发事务排队/拒绝/嵌套报错、提交冲突、事务卸载、事务被取消回滚，
-以及一个随机并发加载/卸载的混沌测试（40 个随机种子验证过）。
+`pytest` + anyio 插件，只在 **asyncio** 上运行。共 150+ 个测试：M0 的 24 个 + 作用域/锁/注入/超时重试/诊断/dry-run/stop-first/
+事件/Secret/trace/JSONL/配置/CLI/stubgen（含 pyright `--strict` 检查 `ctx.llm` 的类型）测试、hypothesis 属性测试
+（随机事务程序回滚后快照不变、作用域隔离与回收、事件顺序、配置 diff 收敛）、以及覆盖作用域与事务的混沌测试
+（`VENTRI_CHAOS_SEEDS=1000 uv run pytest tests/test_chaos.py`，1000 个种子已验证）。在 Python 3.12 / 3.13 / 3.14 上通过。
 
-## 已知限制 / 下一步
+## 已知限制
 
-- 服务是 Kernel 全局的：没有 cordis 的 isolate / 作用域服务、属性代理（mixin）、可选依赖；
-- `emit` 是 async（cordis 是同步）；监听器无优先级/prepend；
-- `FAILED` fiber 不会自动重试（用 `fiber.restart()` 或 `ctx.replace` 修复）；依赖环只会静默停在 PENDING，没有诊断；
-- 事务锁是 Kernel 级的粗粒度锁，可细化为按 key/子树加锁；reconcile 每轮 O(N)，适合数百插件规模；
-- apply 没有超时（可在插件内用 `anyio.fail_after`，或后续在内核层加）；
-- 下一步（面向 DeepSeek Agent）：`stop-first` 替换策略；从配置文件计算期望状态并以单个事务 diff 应用（声明式热重载）；
-  DeepSeek 客户端服务插件（`ctx.enter(httpx.AsyncClient())`）、工具注册表服务、MCP 桥接；trace 导出到 OpenTelemetry/JSONL。
+- 插件**源码**修改不会被检测（开发模式代码重载不在 M1）；OpenTelemetry 导出与配置目录 git 账本在 M3；沙箱不在 M1；
+- `ventri apply` 无守护进程通道（见上）；
+- 只支持 asyncio；1.0 只支持 macOS（CI 以 macOS 为主，Linux 做回归）。
