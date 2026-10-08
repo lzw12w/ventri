@@ -86,8 +86,10 @@ class Context:
     def provide(self, key: Any, value: Any, *, name: str | None = None) -> Any:
         """Bind ``value`` under ``key`` (a class or a string) for this fiber's lifetime.
 
-        ``name`` additionally enables ``ctx.<name>`` attribute access (string keys
-        get it automatically). Inside a transaction the binding is staged and only
+        ``name`` additionally enables ``ctx.<name>`` attribute access. String keys get
+        it automatically, and so does a key the plugin declares by name
+        (``provides={"llm": ModelProvider}`` -> ``ctx.llm``; this is what ``ventri
+        stubgen`` types). Inside a transaction the binding is staged and only
         visible to staged fibers until commit.
         """
         from .kernel import Binding
@@ -97,7 +99,12 @@ class Context:
         realm = k._realm_of(f, key)
         if k._lookup(realm, key, tx) is not None:
             raise ServiceConflict(f"{keyname(key)} is already provided")
-        b = Binding(key, value, f, name or (key if isinstance(key, str) else None), tx, realm)
+        if name is None:
+            if isinstance(key, str):
+                name = key
+            elif f.spec is not None:
+                name = next((n for n, k2 in f.spec.provides.items() if k2 is key), None)
+        b = Binding(key, value, f, name, tx, realm)
         f._push_effect(lambda: k._unbind(b), f"service:{keyname(key)}")
         if tx is not None:
             tx._overlay[(realm, key)] = b
