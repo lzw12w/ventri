@@ -13,9 +13,11 @@ OUT="${1:-$HERE/dist/ventri_bundle.tgz}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-PY="$(uv python find --managed-python 3.12)"
-PYROOT="$(cd "$(dirname "$PY")/.." && pwd)"
-cp -a "$PYROOT" "$WORK/rt"
+# the standalone interpreter itself, not a project virtualenv (uv may return .venv/bin/python)
+PY="$(cd /tmp && uv python find --managed-python --no-project 3.12)"
+PYROOT="$("$PY" -c 'import sys; print(sys.base_prefix)')"
+cp -aL "$PYROOT" "$WORK/rt"
+test -x "$WORK/rt/bin/python3.12"
 rm -f "$WORK"/rt/lib/python3.12/EXTERNALLY-MANAGED
 (cd "$REPO" && uv build --all-packages --wheel -o "$WORK/wheels" -q)
 uv pip install -q --python "$WORK/rt/bin/python3.12" --no-cache "$WORK"/wheels/*.whl

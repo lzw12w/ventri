@@ -25,6 +25,10 @@ Agent kwargs (`--agent-kwarg k=v`): `effort` (high), `max_steps` (250), `max_cos
 `shell_timeout` (600 s per foreground command), `prune_tokens` (40000; 0 disables context pruning),
 `wall_sec` (870, only used when the task timeout cannot be resolved).
 
+> Status: the adapter was moved here and reworked (headless mode, task timeout, ATIF) after the
+> Terminal-Bench pilot; it has not been re-run against Terminal-Bench since. The ATIF converter, the
+> timeout resolution and the runner (run locally) are tested; the bundle is checked to unpack and import.
+
 ## What runs in the container
 
 * The bundle is unpacked to a hidden per-trial path (`/usr/local/lib/.vrt-<hex>`), never put on `PATH`;
