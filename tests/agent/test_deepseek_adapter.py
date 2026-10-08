@@ -282,6 +282,14 @@ async def test_mid_stream_break_is_not_replayed():
     assert len(rec.requests) == 1  # never re-sent after output was yielded
 
 
+@pytest.mark.parametrize("finish", ["insufficient_system_resource", "aborted"])
+async def test_server_interrupted_generation_is_an_error(finish):
+    rec = Recorder(sse(chunk({"content": "half an ans"}), chunk({}, finish=finish, usage=USAGE)))
+    with pytest.raises(ProviderError, match=finish) as ei:
+        await collect(provider(rec).stream(req()))
+    assert ei.value.retryable and len(rec.requests) == 1
+
+
 async def test_stream_error_chunk_raises():
     rec = Recorder(sse('data: {"error": {"message": "overloaded"}}\n\n', done=False))
     p = provider(rec, max_retries=0)

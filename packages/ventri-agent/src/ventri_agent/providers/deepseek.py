@@ -22,6 +22,12 @@ API facts re-verified 2026-10-08 (https://api-docs.deepseek.com):
 * usage: ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``; in a
   stream the usage rides on the last chunk (no separate usage chunk).
 * 429 when over the account concurrency (Flash 2500, Pro 500); 500/503 retry.
+* ``finish_reason`` may also be ``insufficient_system_resource`` / ``aborted``
+  (treated as a retryable error, not as an answer); ``user_id`` isolates the
+  KV cache per user; function names allow only ``[A-Za-z0-9_-]`` (<= 128).
+* Observed live on 2026-10-08 (not documented): omitting ``reasoning_content``
+  in a tools + thinking follow-up returned 200, not 400; ``anyOf [T, null]`` is
+  accepted in strict schemas; cache hits are reported in 128-token blocks.
 """
 from __future__ import annotations
 

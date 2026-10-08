@@ -49,6 +49,7 @@ from .base import CallStats, ModelCaps, ModelProvider, ProviderError, RequestInv
 from .pricing import PriceTable
 
 RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+INTERRUPTED = frozenset({"insufficient_system_resource", "aborted"})
 
 
 @dataclass
@@ -252,6 +253,8 @@ class OpenAICompatProvider:
                     finish = choice["finish_reason"]
         if finish is None:
             raise ProviderError("stream ended before finish_reason (connection dropped?)", retryable=True)
+        if finish in INTERRUPTED:  # DeepSeek: the server cut the generation short -- not an answer
+            raise ProviderError(f"generation interrupted by the server (finish_reason={finish})", retryable=True)
         tool_calls = [ToolCall(p.id or f"call_{i}", p.name, "".join(p.args) or "{}")
                       for i, p in sorted(calls.items())]
         thinking = saw_reasoning or bool(req.thinking)
