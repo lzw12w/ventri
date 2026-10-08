@@ -14,6 +14,7 @@ from .errors import (
     TransactionError,
     TransactionTimeout,
 )
+from .events import Deny, Event, Rewrite
 from .fiber import Fiber, State, TaskHandle
 from .kernel import Binding, Kernel, Realm, TraceEvent
 from .plugin import Retry, plugin
@@ -25,7 +26,9 @@ __version__ = "0.2.0a1"
 __all__ = [
     "Binding",
     "Context",
+    "Deny",
     "DependencyCycle",
+    "Event",
     "Fiber",
     "Kernel",
     "KernelError",
@@ -33,6 +36,7 @@ __all__ = [
     "PluginError",
     "Realm",
     "Retry",
+    "Rewrite",
     "ServiceConflict",
     "ServiceNotFound",
     "State",

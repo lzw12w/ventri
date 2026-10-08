@@ -1,6 +1,7 @@
 """Context: the API surface a plugin sees. One Context per fiber; ``ctx.parent`` walks up."""
 from __future__ import annotations
 
+import bisect
 import inspect
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, TypeVar, overload
@@ -8,6 +9,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, overload
 import anyio
 
 from .errors import ServiceConflict, ServiceNotFound
+from .events import Deny, Event, Rewrite, event_name
 from .fiber import LIVE, maybe_await
 from .plugin import MISSING, keyname
 
@@ -178,19 +180,41 @@ class Context:
         return self.fiber.spawn(fn, *args, name=name)
 
     # ----------------------------------------------------------------- events
-    def on(self, event: str, handler: Callable[..., Any]) -> Callable[[], None]:
+    @overload
+    def on(self, event: Event[T], handler: Callable[[T], Any], *,
+           priority: int = 0) -> Callable[[], None]: ...
+    @overload
+    def on(self, event: str, handler: Callable[..., Any], *,
+           priority: int = 0) -> Callable[[], None]: ...
+
+    def on(self, event: Any, handler: Callable[..., Any], *, priority: int = 0) -> Callable[[], None]:
+        """Listen to ``event`` (an ``Event[T]`` key or a string) for this fiber's
+        lifetime. Listeners run by ``priority`` (higher first), then registration
+        order. Returns a function that removes the listener early."""
+        return self._listen(event_name(event), handler, priority)
+
+    def intercept(self, event: Event[T] | str, fn: Callable[[T], Any], *,
+                  priority: int = 0) -> Callable[[], None]:
+        """Register an interceptor for ``event``: ``fn(value)`` returns ``Deny(reason)``,
+        ``Rewrite(new_value)`` or ``None`` (pass). Dispatched by :meth:`check`, never by
+        ``emit``. Removed with the fiber."""
+        return self._listen(("intercept", event_name(event)), fn, priority)
+
+    def _listen(self, bucket_key: Any, handler: Callable[..., Any], priority: int) -> Callable[[], None]:
         from .kernel import Listener
 
         k, f = self.kernel, self.fiber
-        lst = Listener(handler, f)
-        k._listeners.setdefault(event, []).append(lst)
+        lst = Listener(handler, f, priority, next(k._listener_seq))
+        bucket = k._listeners.setdefault(bucket_key, [])
+        bisect.insort(bucket, lst, key=_order)
+        label = bucket_key if isinstance(bucket_key, str) else ":".join(bucket_key)
 
         def remove() -> None:
-            bucket = k._listeners.get(event, [])
-            if lst in bucket:
-                bucket.remove(lst)
+            b = k._listeners.get(bucket_key, [])
+            if lst in b:
+                b.remove(lst)
 
-        eff = f._push_effect(remove, f"listener:{event}")
+        eff = f._push_effect(remove, f"listener:{label}")
 
         def off() -> None:
             remove()
@@ -198,40 +222,85 @@ class Context:
                 f._effects.remove(eff)
         return off
 
-    def _targets(self, event: str) -> list:
+    def _targets(self, event: Any) -> list:
         return self.kernel._listeners_for(event, self.fiber)
 
-    async def emit(self, event: str, *args: Any) -> None:
+    @overload
+    async def emit(self, event: Event[T], payload: T, /) -> None: ...
+    @overload
+    async def emit(self, event: str, /, *args: Any) -> None: ...
+
+    async def emit(self, event: Any, /, *args: Any) -> None:
         """Call listeners sequentially; listener errors are traced, not raised."""
-        for lst in self._targets(event):
-            await self._safe(event, lst, args)
+        name = event_name(event)
+        for lst in self._targets(name):
+            await self._safe(name, lst, args)
 
-    async def parallel(self, event: str, *args: Any) -> None:
+    @overload
+    async def parallel(self, event: Event[T], payload: T, /) -> None: ...
+    @overload
+    async def parallel(self, event: str, /, *args: Any) -> None: ...
+
+    async def parallel(self, event: Any, /, *args: Any) -> None:
         """Call listeners concurrently; listener errors are traced, not raised."""
+        name = event_name(event)
         async with anyio.create_task_group() as tg:
-            for lst in self._targets(event):
-                tg.start_soon(self._safe, event, lst, args)
+            for lst in self._targets(name):
+                tg.start_soon(self._safe, name, lst, args)
 
-    async def serial(self, event: str, *args: Any) -> Any:
+    @overload
+    async def serial(self, event: Event[T], payload: T, /) -> Any: ...
+    @overload
+    async def serial(self, event: str, /, *args: Any) -> Any: ...
+
+    async def serial(self, event: Any, /, *args: Any) -> Any:
         """Await listeners in order; return the first non-None result (errors propagate)."""
-        for lst in self._targets(event):
+        for lst in self._targets(event_name(event)):
             r = await maybe_await(lst.fn(*args))
             if r is not None:
                 return r
         return None
 
-    def bail(self, event: str, *args: Any) -> Any:
+    @overload
+    def bail(self, event: Event[T], payload: T, /) -> Any: ...
+    @overload
+    def bail(self, event: str, /, *args: Any) -> Any: ...
+
+    def bail(self, event: Any, /, *args: Any) -> Any:
         """Synchronous ``serial``: first non-None result. Async listeners are rejected."""
-        for lst in self._targets(event):
+        name = event_name(event)
+        for lst in self._targets(name):
             r = lst.fn(*args)
             if inspect.isawaitable(r):
                 close = getattr(r, "close", None)
                 if close:
                     close()
-                raise TypeError(f"bail({event!r}) got an async listener; use serial()")
+                raise TypeError(f"bail({name!r}) got an async listener; use serial()")
             if r is not None:
                 return r
         return None
+
+    async def check(self, event: Event[T] | str, value: T) -> T | Deny:
+        """Run the interceptors of ``event`` (priority order) on ``value``.
+
+        ``Deny`` stops the chain and is returned; ``Rewrite(v)`` replaces the value
+        and the chain continues; ``None`` passes. Returns the (possibly rewritten)
+        value if nobody denied. Interceptor errors propagate (callers fail closed).
+        Unlike ``serial``, a ``Rewrite`` does not end the chain, so auditing
+        interceptors registered after a rewriting one see the final value."""
+        name = event_name(event)
+        for lst in self._targets(("intercept", name)):
+            verdict = await maybe_await(lst.fn(value))
+            if verdict is None:
+                continue
+            if isinstance(verdict, Deny):
+                return verdict
+            if isinstance(verdict, Rewrite):
+                value = verdict.value
+                continue
+            raise TypeError(f"interceptor for {name!r} returned {verdict!r}; "
+                            "expected Deny, Rewrite or None")
+        return value
 
     async def _safe(self, event: str, lst: Any, args: tuple) -> None:
         try:
@@ -286,3 +355,7 @@ class ScopePlugin:
 
     def __repr__(self) -> str:
         return f"<scope {self.name}>"
+
+
+def _order(lst: Any) -> tuple[int, int]:
+    return (-lst.priority, lst.seq)
