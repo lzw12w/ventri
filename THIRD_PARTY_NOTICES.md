@@ -9,7 +9,13 @@ Ventri includes code adapted from the following third-party projects.
 - Used in: `packages/ventri-agent/src/ventri_agent/tools/_hermes_fs/` (file-tool core: fuzzy
   find-and-replace, read/write/patch operations, search, read-before-write state, write guards),
   the file-tool behaviour of `packages/ventri-agent/src/ventri_agent/tools/fs.py` and `notes.py`,
-  and the ported tests `tests/agent/test_hermes_fuzzy_match.py` and `tests/agent/test_fs_hermes.py`.
+  and the ported tests `tests/agent/test_hermes_fuzzy_match.py` and `tests/agent/test_fs_hermes.py`;
+  `packages/ventri-agent/src/ventri_agent/tools/_url_safety.py` (SSRF / connect-time DNS-rebinding guard
+  and credential-in-URL checks, from `tools/url_safety.py` and the secret prefixes of `agent/redact.py`);
+  `packages/ventri-agent/src/ventri_agent/threat_patterns.py` (memory-write injection scan, from
+  `tools/threat_patterns.py`); the ANSI stripping and head/tail split in
+  `packages/ventri-agent/src/ventri_agent/tools/output.py` (from `tools/ansi_strip.py` and
+  `tools/tool_output_truncate.py`).
   Each adapted file carries an attribution header naming its Hermes source files.
 - License: MIT
 

@@ -149,7 +149,7 @@ Alpha: public but may still change within 0.2.x. Design: DESIGN.md section 5 and
 | `ventri_agent.permission` | `Policy`, `ApprovalBroker`, `AuditLog` | `rules: [{tool, action, risk?, when?, origin?, agent?, session?}]`, `approval_timeout=120`, `audit` |
 | `ventri_agent.memory` | `LongTermMemory` | `path` (`~/.ventri/memory.db`, or `:memory:`) |
 | `ventri_agent.sessions` | `SessionManager` | `dir`, `idle_timeout=1800`, `retention_days=7`, `budget`, `agents`, `extract_memory=true`, `sweep_interval` |
-| `ventri_agent.tools.core` / `.fs` / `.shell` / `.web` / `.notes` / `.memory` / `.inspect` | tools | fs: `roots`, `write` (file behaviour adapted from Hermes Agent, see THIRD_PARTY_NOTICES.md); shell: `cwd`, `policy`, `timeout`, `max_output`; web: `allow_domains`, `timeout`, `max_bytes`; notes: `vault`, `write` |
+| `ventri_agent.tools.core` / `.fs` / `.shell` / `.web` / `.notes` / `.memory` / `.inspect` | tools | fs: `roots`, `write` (file behaviour adapted from Hermes Agent, see THIRD_PARTY_NOTICES.md); shell: `cwd`, `policy`, `timeout`, `max_capture_bytes=4000000`, `tail_bytes=256000`, `preview_tokens=6000` (`max_output` ignored); web: `allow_domains`, `timeout`, `max_bytes`, `max_redirects=5`, `allow_private_urls=false` (SSRF guard adapted from Hermes Agent); notes: `vault`, `write`; memory tools: `memory.search`, `memory.remember`, `memory.update`, `memory.forget` |
 | `ventri_agent.channels.cli` | `CliChannel` | `session`, `agent`, `resume_last`, `show_thinking` (exclusive; reads an optional `"cli.terminal"` service) |
 
 Session-scope plugins loaded by `SessionManager.open` (not used directly in `ventri.yml`):
@@ -168,7 +168,7 @@ Top-level `agents: {name: {persona, tools: [globs], route, loop, memory_k}}` in 
 - `providers.pricing`: `PriceTable` (`price`, `lookup`, `from_config`), `ModelPrice`, `PeakSchedule` (`is_peak`, `next_off_peak`).
 - `tools.registry`: `Tool(name, description, handler, params, risk, idempotent, parallel_safe, default_action, default_allow,
   grantable, subject, untrusted, timeout)`, `Risk` (`READ < WRITE_LOCAL < EXTERNAL < IRREVERSIBLE < SPEND`), `ToolError`,
-  `ToolContext`, `ToolRegistry` (`register(ctx, tool)` -- unregistered with the fiber, `get`, `select(globs)`, `version`, `watch`),
+  `ToolContext` (`session_id, ctx, workdir, origin, extras, call_id`), `ToolRegistry` (`register(ctx, tool)` -- unregistered with the fiber, `get`, `select(globs)`, `version`, `watch`),
   `tool_schema(model, strict=True)`.
 - `permission`: `ToolRequest`, `ToolCheck` (event), `Policy.decide`, `Rule`, `Grants`, `ApprovalBroker` (`bind(session, channel, ask)`,
   `request`, `verify`), `ApprovalRequest`, `ApprovalDecision`, `ApprovalRequested` (event), `AuditLog`.
@@ -178,8 +178,13 @@ Top-level `agents: {name: {persona, tools: [globs], route, loop, memory_k}}` in 
 - `sessions`: `SessionManager` (`open(id=None, agent=, channel=, origin=)`, `get`, `suspend`, `end`, `list`, `last_id`,
   `sweep_idle`, `sweep_retention`), `Session` (`turn`, `retry`, `suspend`, `end`, `alive`, `loop`, `ctx`), `SessionError`.
 - `session`: `SessionLog` (JSONL; `replay(path) -> Replay`), `SessionInfo`, `AgentPreset`, `Budget` / `BudgetLimits`.
-- `memory`: `LongTermMemory` (`add, update, confirm, forget, get, list, search, top, export_markdown, import_markdown`),
-  `WorkingMemory`, `MemoryItem`.
+- `memory`: `LongTermMemory` (`remember -> Remembered(item, action=created|duplicate|superseded, previous)`, `add -> (item, created)`,
+  `update(id, text) -> MemoryItem | None` (restores a superseded item), `confirm` (applies a pending supersede), `forget`, `get`,
+  `list(status=active|pending|superseded|None)`, `search`, `top`, `export_markdown`, `import_markdown`), `WorkingMemory`,
+  `MemoryItem` (`… status, supersedes, superseded_by`).
+- `tokens`: `estimate_tokens(text)` (CJK 0.6 / other 0.3 token per char, DeepSeek's documented ratio), `prefix_within`, `suffix_within`.
+- `threat_patterns`: `scan_for_threats(text, scope)`, `first_threat_message(text, scope="strict")` (adapted from Hermes Agent).
+- `tools.output`: `strip_ansi`, `head_tail`, `preview(tc, text, kind, budget=6000)`, `write_artifact(tc, text, kind)`.
 
 ### Session log records (`~/.ventri/sessions/<id>.jsonl`)
 
