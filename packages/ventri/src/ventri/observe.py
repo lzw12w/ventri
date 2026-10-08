@@ -74,6 +74,8 @@ def render_tree(kernel: Kernel) -> str:
             s += f" tasks={n['tasks']}"
         if n["error"]:
             s += f" error={n['error']}"
+        if n["pending_reason"]:
+            s += f" ({n['pending_reason']})"
         return s
 
     def walk(n: dict, prefix: str, last: bool, top: bool) -> None:

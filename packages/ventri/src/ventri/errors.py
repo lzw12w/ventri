@@ -39,3 +39,7 @@ class TransactionConflict(TransactionError):
 
 class TransactionTimeout(TransactionError):
     """The transaction's ``timeout`` elapsed before commit; it was rolled back."""
+
+
+class DependencyCycle(TransactionError):
+    """A strict transaction left fibers PENDING on a dependency cycle."""

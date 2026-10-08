@@ -3,6 +3,7 @@ transactional plugin changes, stable observability. Only asyncio is supported
 (anyio is an internal dependency)."""
 from .context import Context
 from .errors import (
+    DependencyCycle,
     KernelError,
     LoadTimeout,
     PluginError,
@@ -23,6 +24,7 @@ __version__ = "0.2.0a1"
 __all__ = [
     "Binding",
     "Context",
+    "DependencyCycle",
     "Fiber",
     "Kernel",
     "KernelError",

@@ -108,6 +108,7 @@ async def test_isolation_has_no_fallback_to_outer_realm():
         s = await app.scope("s", isolate={SessionLog})
         ag = await s.ctx.plugin(make_agent(seen, running))
         assert ag.state is State.PENDING and seen == []
+        assert ag.pending_reason == "missing: SessionLog (no plugin provides it)"
         await s.ctx.plugin(session_log, {"sid": "s"})
         assert ag.state is State.ACTIVE and seen == [("s", "v1")]
 

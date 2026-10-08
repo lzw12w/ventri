@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Self
 import anyio
 
 from .context import Context
+from .diagnose import diagnose
 from .errors import KernelError
 from .fiber import LIVE, Fiber, State, task_local
 from .plugin import Retry, keyname
@@ -83,6 +84,9 @@ class Kernel(Context):
         self._tracers: list[Callable[[TraceEvent], Any]] = []
         self.trace_log: deque[TraceEvent] = deque(maxlen=trace_limit)
         self._tx_ids = itertools.count(1)
+        self._pending: dict[Fiber, None] = {}           # PENDING fibers (ordered set)
+        self._providers: dict[Any, dict[Fiber, None]] = {}  # key -> fibers that can provide it
+        self._cycles: set[frozenset] = set()            # dependency cycles already traced
         self._tg: Any = None
         self._stack: AsyncExitStack | None = None
         root = Fiber(self, None, None, ctx=self, scope=True)
@@ -288,19 +292,20 @@ class Kernel(Context):
         loc = task_local()
         if full:
             loc.dirty.add(self._root_realm)
-        if not loc.dirty:
-            return
-        loc.depth += 1
-        try:
-            region: set[Realm] = set()
-            while loc.dirty:
-                region |= loc.dirty
-                loc.dirty = set()
-                await self._reconcile(None, region)
-                if tx is not None and tx.state == "open":
-                    await self._reconcile(tx, region)
-        finally:
-            loc.depth -= 1
+        if loc.dirty:
+            loc.depth += 1
+            try:
+                region: set[Realm] = set()
+                while loc.dirty:
+                    region |= loc.dirty
+                    loc.dirty = set()
+                    await self._reconcile(None, region)
+                    if tx is not None and tx.state == "open":
+                        await self._reconcile(tx, region)
+            finally:
+                loc.depth -= 1
+        if self._pending:
+            diagnose(self)
 
     async def _reconcile(self, tx: Transaction | None, region: set[Realm]) -> None:
         """Fixpoint loop over the fibers of ``tx`` (None = live world) in ``region``:

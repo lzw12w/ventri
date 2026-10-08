@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Self
 import anyio
 
 from .errors import (
+    DependencyCycle,
     PluginError,
     TransactionBusy,
     TransactionConflict,
@@ -329,8 +330,10 @@ class Transaction:
         for f in self._staged_fibers():
             if f.state is State.FAILED:
                 raise TransactionError(f"{f.label} failed: {f.error!r}") from f.error
-            if self.strict and f.state is not State.ACTIVE:
-                raise TransactionError(f"{f.label} is {f.state.value} (strict transaction)")
+            if self.strict and f.state is not State.ACTIVE and not f._parked:
+                why = f" ({f.pending_reason})" if f.pending_reason else ""
+                cls = DependencyCycle if (f.pending_reason or "").startswith("cycle") else TransactionError
+                raise cls(f"{f.label} is {f.state.value}{why} (strict transaction)")
 
     def _removed(self) -> set[Fiber]:
         out: set[Fiber] = set()

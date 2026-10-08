@@ -101,6 +101,7 @@ class Context:
         else:
             realm.services[key] = b
         f._bindings.append(b)
+        f._can_provide(key)
         k._trace("service.bind", f, key=keyname(key), staged=tx is not None,
                  **({"realm": realm.name} if realm is not k._root_realm else {}))
         k._mark_dirty(realm, tx)

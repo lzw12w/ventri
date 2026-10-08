@@ -143,6 +143,13 @@ class Fiber:
         self._failures = 0        # current failure streak (retry policy)
         self._retry_gen = 0       # bumps invalidate scheduled retries
         self._active_since: float | None = None
+        self._parked = False      # stop-first: never (re)activated while set
+        self._provided: set = set()  # keys this fiber can provide (declared or bound before)
+        if self.spec is not None:
+            for key in self.spec.provides_keys:
+                self._can_provide(key)
+        if parent is not None:
+            kernel._pending[self] = None
         self._bindings: list[Binding] = []  # live/staged bindings this fiber provides
         self._tx = tx
         self._effects: list[Effect] = []
@@ -217,10 +224,18 @@ class Fiber:
     def __repr__(self) -> str:
         return f"<Fiber {self.label} {self.state.value}>"
 
+    def _can_provide(self, key: Any) -> None:
+        if key not in self._provided:
+            self._provided.add(key)
+            self.kernel._providers.setdefault(key, {})[self] = None
+
     def _set_state(self, state: State, **data: Any) -> None:
         old, self.state = self.state, state
-        if state is not State.PENDING:
+        if state is State.PENDING:
+            self.kernel._pending[self] = None
+        else:
             self.pending_reason = None
+            self.kernel._pending.pop(self, None)
         self.kernel._trace("fiber.state", self, old=old.value, new=state.value, **data)
 
     @asynccontextmanager
@@ -336,7 +351,7 @@ class Fiber:
         k = self.kernel
         async with self._locked():
             parent = self.parent
-            if self.state is not State.PENDING or self._dispose_requested:
+            if self.state is not State.PENDING or self._dispose_requested or self._parked:
                 return False
             if parent is None or parent.state not in LIVE or parent._tg is None:
                 return False
@@ -428,6 +443,13 @@ class Fiber:
 
     def _finalize_dispose(self) -> None:
         self._set_state(State.DISPOSED)
+        providers = self.kernel._providers
+        for key in self._provided:
+            bucket = providers.get(key)
+            if bucket is not None:
+                bucket.pop(self, None)
+                if not bucket:
+                    del providers[key]
         if self.parent is not None and self in self.parent.children:
             self.parent.children.remove(self)
 
