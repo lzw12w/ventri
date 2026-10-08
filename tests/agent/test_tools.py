@@ -173,7 +173,10 @@ async def test_web_fetch_extracts_markdown(tmp_path):
             return httpx.Response(200, text="<rss>items</rss>", headers={"content-type": "application/rss+xml"})
         return httpx.Response(200, text=PAGE, headers={"content-type": "text/html; charset=utf-8"})
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    t = web.make_tool(web.WebConfig(allow_domains=["*.python.org"]), http)
+
+    async def public(host, port):
+        return ["93.184.216.34"]
+    t = web.make_tool(web.WebConfig(allow_domains=["*.python.org"]), http, resolver=public)
     out = await run(t, {"url": "https://example.com/page"}, tmp_path)
     assert "Title: Example Page" in out and "# Heading" in out and "evil()" not in out
     assert "[link](https://example.com/next)" in out and "- one" in out
