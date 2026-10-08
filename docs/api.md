@@ -156,9 +156,11 @@ Session-scope plugins loaded by `SessionManager.open` (not used directly in `ven
 `permission.gate` (provides `Grants`, intercepts `ToolCheck`), `context.context_builder` (`ContextBuilder`),
 `loop.agent_loop` (`AgentLoop`; replaceable per agent preset with `agents: {name: {loop: "<use>"}}`).
 Top-level `agents: {name: {persona, tools: [globs], route, loop, memory_k, system_prompt, time_notes, mode,
-prune_tokens, prune_keep, inline_tokens}}` in `ventri.yml` defines presets. `system_prompt` (file or inline) replaces
-persona + rules; `time_notes` (default on, off when headless); `mode: headless` presets open only with `headless=True`;
-`prune_tokens` (0 = off) / `prune_keep` (6) control context pruning; `inline_tokens` (8000) is the artifact spill threshold.
+inline_tokens, compact_at, compact_keep_turns, compact_keep_steps}}` in `ventri.yml` defines presets. `system_prompt`
+(file or inline) replaces persona + rules; `time_notes` (default on, off when headless); `mode: headless` presets open
+only with `headless=True`; `inline_tokens` (8000) is the artifact spill threshold; compaction triggers at `compact_at`
+(0.6, range 0.1-0.95) x the model's soft context, keeps the last `compact_keep_turns` (4) user turns and, inside a long
+turn, the last `compact_keep_steps` (6) model steps.
 
 ### Types
 
@@ -175,13 +177,17 @@ persona + rules; `time_notes` (default on, off when headless); `mode: headless` 
   `tool_schema(model, strict=True)`.
 - `permission`: `ToolRequest`, `ToolCheck` (event), `Policy.decide`, `Rule`, `Grants`, `ApprovalBroker` (`bind(session, channel, ask)`,
   `request`, `verify`), `ApprovalRequest`, `ApprovalDecision`, `ApprovalRequested` (event), `AuditLog`.
-- `loop`: `AgentLoop` (`turn(text, sink, plan=False) -> TurnResult`, `retry`, `compact`, `extract_memories`), `TurnEvent`
+- `loop`: `AgentLoop` (`turn(text, sink, plan=False) -> TurnResult`, `retry`,
+  `compact(sink, keep_turns=, keep_steps=, goal=, force=False) -> bool`, `extract_memories`), `TurnEvent`
   (`turn.start | reasoning | content | tool.call | tool.start | tool.end | notice | error | turn.end`), `TurnResult`,
   events `MessageIn` / `AgentOutput`.
 - `sessions`: `SessionManager` (`open(id=None, agent=, channel=, origin=, headless=False)`, `get`, `suspend`, `end`, `list`, `last_id`,
   `sweep_idle`, `sweep_retention`), `Session` (`turn`, `retry`, `suspend`, `end`, `alive`, `loop`, `ctx`), `SessionError`.
 - `session`: `SessionLog` (JSONL; `replay(path) -> Replay`), `SessionInfo` (`… headless`), `AgentPreset`, `Budget` / `BudgetLimits`.
-- `context`: `ContextBuilder` (`build`, `maybe_prune`, `system_text`, compaction), `RULES`, `HEADLESS_SYSTEM`, `apply_prune(history, edits)`.
+- `context`: `ContextBuilder` (`build`, `system_text`, `estimate_tokens`, `trigger_tokens(route)`, `hard_limit(route)`,
+  `needs_compaction`, `compaction_plan(goal, keep_turns=, keep_steps=, force=) -> CompactionPlan | None`, `apply_compaction`),
+  `CompactionPlan` (`drop, span, kept_steps, trims, before, after`), `transcript(msgs)`, `RULES`, `HEADLESS_SYSTEM`.
+- `session.apply_compact(history, record)`: applies one `compact` record (live and on replay).
 - `permission` (headless): `Unattended(ask, irreversible)`, `Policy.decide_unattended(req)`; audit `decided_by: unattended-policy`.
 - `tools.shell`: `ShellJobs` (session service: jobs + persisted cwd/env; `close()` on dispose), `clean_env(base=None, hide_runtime=True, hide_paths=())`, `read_env_file`, `make_tools(cfg)`.
 - `memory`: `LongTermMemory` (`remember -> Remembered(item, action=created|duplicate|superseded, previous)`, `add -> (item, created)`,
@@ -194,10 +200,12 @@ persona + rules; `time_notes` (default on, off when headless); `mode: headless` 
 
 ### Session log records (`~/.ventri/sessions/<id>.jsonl`)
 
-`meta` (`headless` when set), `prefix` (epoch: system, memory, tool names, tools, strict, hash), `msg`, `compact` (drop, summary),
-`prune` (edits by message `seq`: content / args / reasoning, saved), `usage`
+`meta` (`headless` when set), `prefix` (epoch: system, memory, tool names, tools, strict, hash), `msg`, `compact` (drop, summary;
+intra-turn: `span` [a, b) of the remaining history replaced by `progress`, `steps`, `trim` [{seq, content}]), `usage`
 (model, route, usage, cost_usd, peak, finish), `turn`, `work`, `state` (`resumed | suspended | ended | memory`).
-Every record has `t` and `ts`. Append-only; a torn last line is skipped on replay.
+Every record has `t` and `ts`. Append-only; a torn last line is skipped on replay. `prune` records (written only by
+0.2.0a1 development builds, feature removed) are ignored. Trace events include `context.compact` (parts, dropped, steps,
+kept_steps, trimmed, before, after, forced).
 
 ### CLI
 
