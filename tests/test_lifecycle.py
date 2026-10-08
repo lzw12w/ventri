@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import anyio
 import pytest
 
-from ventri import (Kernel, ServiceConflict, ServiceNotFound, State, plugin)
+from ventri import Kernel, ServiceConflict, ServiceNotFound, State, plugin
 
 from .conftest import LLM, llm_plugin, make_tool, wait_for
 

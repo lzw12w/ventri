@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import enum
 import inspect
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
@@ -23,7 +24,7 @@ from .plugin import PluginSpec, describe
 
 if TYPE_CHECKING:  # pragma: no cover
     from .context import Context
-    from .kernel import Binding, Kernel
+    from .kernel import Binding, Kernel, Realm
     from .transaction import Transaction
 
 
@@ -44,13 +45,14 @@ class _TaskLocal:
     """Per-task bookkeeping. Keyed by task id so that tasks which inherit a copied
     contextvars.Context from their spawner do not inherit its state."""
 
-    __slots__ = ("task_id", "depth", "owner", "tx")
+    __slots__ = ("depth", "dirty", "owner", "task_id", "tx")
 
     def __init__(self, task_id: int) -> None:
         self.task_id = task_id
         self.depth = 0                  # nesting of kernel operations (reconcile once at depth 0)
         self.owner: Fiber | None = None  # fiber whose task group runs this task
         self.tx: Transaction | None = None
+        self.dirty: set[Realm] = set()  # realms this task changed; its outermost op settles them
 
 
 _local: ContextVar[_TaskLocal | None] = ContextVar("ventri_local", default=None)
@@ -102,7 +104,8 @@ class TaskHandle:
 class Fiber:
     def __init__(self, kernel: Kernel, parent: Fiber | None, plugin: Any,
                  config: Any = None, *, tx: Transaction | None = None,
-                 ctx: Context | None = None) -> None:
+                 ctx: Context | None = None, scope: bool = False,
+                 isolate: frozenset = frozenset(), meta: dict | None = None) -> None:
         from .context import Context
 
         self.kernel = kernel
@@ -115,8 +118,24 @@ class Fiber:
         self.instance: Any = None
         self.state = State.PENDING
         self.error: BaseException | None = None
+        self.pending_reason: str | None = None
+        self.meta: dict = meta or {}
         self.children: list[Fiber] = []
         self.ctx: Context = ctx if ctx is not None else Context(kernel, self)
+        # scopes: a scope fiber owns a realm for the keys it isolates and bounds events
+        self.is_scope = scope
+        self.isolate = isolate
+        self.realm: Realm | None = None
+        if scope and parent is not None:
+            from .kernel import Realm
+            self.realm = Realm(self.name, self)
+        self.scope_fiber: Fiber = self if scope or parent is None else parent.scope_fiber
+        if parent is None:
+            self.scope_chain: frozenset[Fiber] = frozenset((self,))
+        else:
+            self.scope_chain = parent.scope_chain | {self} if scope else parent.scope_chain
+        self._realm_cache: dict[Any, Realm] = {}
+        self._bindings: list[Binding] = []  # live/staged bindings this fiber provides
         self._tx = tx
         self._effects: list[Effect] = []
         self._snapshot: dict[Any, Binding] = {}
@@ -141,7 +160,22 @@ class Fiber:
 
     @property
     def inject(self) -> tuple:
+        """Required dependency keys."""
         return self.spec.inject if self.spec else ()
+
+    @property
+    def optional(self) -> tuple:
+        """Optional dependency keys (``X | None``): bound if present, never block."""
+        return self.spec.optional if self.spec else ()
+
+    @property
+    def deps(self) -> tuple:
+        return self.spec.deps if self.spec else ()
+
+    @property
+    def scope(self) -> Fiber:
+        """The nearest enclosing scope fiber (the root fiber if none)."""
+        return self.scope_fiber
 
     @property
     def tx(self) -> Transaction | None:
@@ -158,6 +192,8 @@ class Fiber:
 
     def _set_state(self, state: State, **data: Any) -> None:
         old, self.state = self.state, state
+        if state is not State.PENDING:
+            self.pending_reason = None
         self.kernel._trace("fiber.state", self, old=old.value, new=state.value, **data)
 
     @asynccontextmanager
@@ -180,7 +216,7 @@ class Fiber:
     async def _run_effect(self, eff: Effect) -> None:
         try:
             await maybe_await(eff.fn())
-        except Exception as e:  # cleanup errors are reported, never propagated
+        except Exception as e:  # noqa: BLE001 - cleanup errors are reported, never propagated
             self.kernel._trace("effect.error", self, effect=eff.label, error=repr(e))
 
     # ------------------------------------------------------- task group host
@@ -236,7 +272,7 @@ class Fiber:
             try:
                 with scope:
                     await fn(*args)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - supervisor: a task crash fails its fiber
                 k._trace("task.error", self, task=label, error=repr(e))
                 k._crash(self, e)  # failure propagates to the owning fiber
             finally:
@@ -277,7 +313,7 @@ class Fiber:
                 return False
             if parent is None or parent.state not in LIVE or parent._tg is None:
                 return False
-            snapshot = k._resolve(self.inject, self.tx)
+            snapshot = k._resolve(self)
             if snapshot is None:
                 return False
             self._snapshot, self.error = snapshot, None
@@ -289,7 +325,7 @@ class Fiber:
                     await self._open_scope()
                     await self._apply()
                     ok = True
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - any apply error -> FAILED (fiber.error)
                 err = e
             finally:
                 # Runs on success, error, own cancellation *and* outer cancellation.

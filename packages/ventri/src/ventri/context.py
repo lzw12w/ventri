@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, overload
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 import anyio
 
@@ -32,7 +33,7 @@ class Context:
         return self.fiber.parent.ctx if self.fiber.parent else None
 
     # ---------------------------------------------------------------- plugins
-    async def plugin(self, plugin: Any, config: Any = None) -> Fiber:
+    async def plugin(self, plugin: Any, config: Any = None, *, meta: dict | None = None) -> Fiber:
         """Load ``plugin`` as a child of this context's fiber.
 
         Returns the fiber; it is ACTIVE, PENDING (deps missing) or FAILED (see
@@ -43,7 +44,29 @@ class Context:
 
         if self.fiber.state not in LIVE:
             raise RuntimeError(f"cannot load plugins under {self.fiber!r}")
-        fiber = Fiber(self.kernel, self.fiber, plugin, config)
+        return await self._load(Fiber(self.kernel, self.fiber, plugin, config, meta=meta))
+
+    async def scope(self, name: str, isolate: Iterable[Any] = (), *,
+                    meta: dict | None = None) -> Fiber:
+        """Create a child *scope*: a container fiber that is the realm boundary for
+        the keys in ``isolate`` and an event boundary.
+
+        Inside the scope, ``provide``/``get`` of an isolated key use the scope's own
+        realm; other keys resolve to the nearest ancestor realm isolating them, else
+        the root realm. Sibling scopes never see each other's isolated services or
+        events. ``await scope.dispose()`` reclaims everything inside (fibers, tasks,
+        listeners, services) deterministically. Use ``scope.ctx`` to load plugins
+        into it.
+        """
+        from .fiber import Fiber
+
+        if self.fiber.state not in LIVE:
+            raise RuntimeError(f"cannot create a scope under {self.fiber!r}")
+        f = Fiber(self.kernel, self.fiber, ScopePlugin(name), None, scope=True,
+                  isolate=frozenset(isolate), meta=meta)
+        return await self._load(f)
+
+    async def _load(self, fiber: Fiber) -> Fiber:
         async with self.kernel._op(fiber.tx):
             try:
                 await fiber._activate()
@@ -64,13 +87,19 @@ class Context:
 
         k, f = self.kernel, self.fiber
         tx = f.tx
-        if k._lookup(key, tx) is not None:
+        realm = k._realm_of(f, key)
+        if k._lookup(realm, key, tx) is not None:
             raise ServiceConflict(f"{keyname(key)} is already provided")
-        b = Binding(key, value, f, name or (key if isinstance(key, str) else None), tx)
+        b = Binding(key, value, f, name or (key if isinstance(key, str) else None), tx, realm)
         f._push_effect(lambda: k._unbind(b), f"service:{keyname(key)}")
-        (tx._overlay if tx is not None else k._services)[key] = b
-        k._trace("service.bind", f, key=keyname(key), staged=tx is not None)
-        k._mark_dirty(tx)
+        if tx is not None:
+            tx._overlay[(realm, key)] = b
+        else:
+            realm.services[key] = b
+        f._bindings.append(b)
+        k._trace("service.bind", f, key=keyname(key), staged=tx is not None,
+                 **({"realm": realm.name} if realm is not k._root_realm else {}))
+        k._mark_dirty(realm, tx)
         return value
 
     @overload
@@ -84,7 +113,11 @@ class Context:
         """Injected keys resolve to the binding the fiber was activated with (a stable
         per-fiber view, even while a replacement is being swapped in); other keys
         resolve against the registry visible to this fiber."""
-        b = self.fiber._snapshot.get(key) or self.kernel._lookup(key, self.fiber.tx)
+        f = self.fiber
+        b = f._snapshot.get(key)
+        if b is None:
+            k = self.kernel
+            b = k._lookup(k._realm_of(f, key), key, f.tx)
         if b is None:
             if default is _MISSING:
                 raise ServiceNotFound(keyname(key))
@@ -92,13 +125,14 @@ class Context:
         return b.value
 
     def has(self, key: Any) -> bool:
-        return self.kernel._lookup(key, self.fiber.tx) is not None
+        k, f = self.kernel, self.fiber
+        return k._lookup(k._realm_of(f, key), key, f.tx) is not None
 
     def __getattr__(self, name: str) -> Any:
         d = self.__dict__
         if name.startswith("_") or "kernel" not in d:
             raise AttributeError(name)
-        b = d["kernel"]._find_by_name(name, d["fiber"].tx)
+        b = d["kernel"]._find_by_name(d["fiber"], name)
         if b is None:
             raise AttributeError(f"{type(self).__name__} has no attribute or service {name!r}")
         return b.value
@@ -197,7 +231,7 @@ class Context:
     async def _safe(self, event: str, lst: Any, args: tuple) -> None:
         try:
             await maybe_await(lst.fn(*args))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - listener errors are isolated by contract
             self.kernel._trace("event.error", lst.fiber, event=event, error=repr(e))
 
     # ----------------------------------------------------------- transactions
@@ -220,3 +254,16 @@ class Context:
         async with self.transaction() as tx:
             new = await tx.replace(fiber, plugin=plugin, config=config)
         return new
+
+
+class ScopePlugin:
+    """The (empty) plugin behind a scope fiber; it only carries the scope's name."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __call__(self, ctx: Context) -> None:
+        return None
+
+    def __repr__(self) -> str:
+        return f"<scope {self.name}>"

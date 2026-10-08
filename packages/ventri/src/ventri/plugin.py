@@ -6,8 +6,9 @@ decorator just sets those attributes on functions.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 
 def keyname(key: Any) -> str:
@@ -45,6 +46,11 @@ class PluginSpec:
     config_type: Any
     is_class: bool
     arity: int
+    optional: tuple = ()
+
+    @property
+    def deps(self) -> tuple:
+        return self.inject + self.optional
 
     def call(self, ctx: Any, config: Any) -> Any:
         args = (ctx, config)[: self.arity]

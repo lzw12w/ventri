@@ -5,6 +5,7 @@ Run:  uv sync && uv run python examples/demo.py
 from dataclasses import dataclass
 
 import anyio
+import anyio.lowlevel
 
 from ventri import Kernel, PluginError, plugin
 
@@ -14,7 +15,7 @@ class FakeLLM:
         self.model = model
 
     async def complete(self, prompt: str) -> str:
-        await anyio.sleep(0)
+        await anyio.lowlevel.checkpoint()
         return f"[{self.model}] echo: {prompt}"
 
 

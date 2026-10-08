@@ -20,7 +20,8 @@ raises TransactionBusy).
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, Self
 
 import anyio
 
@@ -30,7 +31,7 @@ from .plugin import MISSING, keyname
 
 if TYPE_CHECKING:  # pragma: no cover
     from .context import Context
-    from .kernel import Binding
+    from .kernel import Binding, Realm
 
 _MISSING = MISSING
 
@@ -41,7 +42,7 @@ class Transaction:
         self.wait, self.strict = wait, strict
         self.state = "new"   # new -> open -> committed | rolled_back
         self.error: BaseException | None = None
-        self._overlay: dict[Any, Binding | None] = {}
+        self._overlay: dict[tuple[Realm, Any], Binding | None] = {}
         self._staged: list[Fiber] = []     # staged roots, in creation order
         self._removals: list[Fiber] = []   # live fibers to dispose on commit
         self._replaces: dict[Fiber, Fiber] = {}  # new -> old
@@ -50,7 +51,7 @@ class Transaction:
         return f"<Transaction {self.state} staged={len(self._staged)} removals={len(self._removals)}>"
 
     # ------------------------------------------------------------ enter/exit
-    async def __aenter__(self) -> Transaction:
+    async def __aenter__(self) -> Self:
         loc = task_local()
         if loc.tx is not None or self.ctx.fiber.tx is not None:
             raise TransactionError("nested transactions are not supported")
@@ -65,7 +66,8 @@ class Transaction:
         self.kernel._trace("tx.begin", self.ctx.fiber)
         return self
 
-    async def __aexit__(self, et: Any, exc: Any, tb: Any) -> bool:
+    async def __aexit__(self, et: type[BaseException] | None, exc: BaseException | None,
+                        tb: TracebackType | None) -> bool:
         task_local().tx = None
         try:
             with anyio.CancelScope(shield=True):
@@ -116,12 +118,16 @@ class Transaction:
         if fiber in self._removals or fiber.state is State.DISPOSED:
             return
         self._removals.append(fiber)
-        subtree = self._subtree(fiber)
-        for key, b in self.kernel._services.items():
-            if b.owner in subtree and key not in self._overlay:
-                self._overlay[key] = None
-        async with self.kernel._op(self):
-            pass  # staged dependents of tombstoned services get restarted
+        k = self.kernel
+        async with k._op(self):  # staged dependents of tombstoned services get restarted
+            for f in self._subtree(fiber):
+                for b in f._bindings:
+                    realm = b.realm
+                    assert realm is not None
+                    rk = (realm, b.key)
+                    if realm.services.get(b.key) is b and rk not in self._overlay:
+                        self._overlay[rk] = None
+                        k._mark_dirty(realm, self)
 
     async def replace(self, fiber: Fiber, plugin: Any = _MISSING, config: Any = _MISSING) -> Fiber:
         """Stage ``fiber`` -> new fiber with new plugin and/or config, same parent."""
@@ -153,7 +159,7 @@ class Transaction:
         return [f for f in self.kernel._walk() if f.tx is self]
 
     async def _prepare(self) -> None:
-        await self.kernel._settle(self)
+        await self.kernel._settle(self, full=True)
         for f in self._staged_fibers():
             if f.state is State.FAILED:
                 raise TransactionError(f"{f.label} failed: {f.error!r}") from f.error
@@ -168,8 +174,8 @@ class Transaction:
 
     def _validate(self) -> None:
         removed = self._removed()
-        for key, b in self._overlay.items():
-            cur = self.kernel._services.get(key)
+        for (realm, key), b in self._overlay.items():
+            cur = realm.services.get(key)
             if b is not None and cur is not None and cur.owner not in removed:
                 raise TransactionConflict(
                     f"{keyname(key)} was provided by {cur.owner.label} during the transaction")
@@ -178,14 +184,15 @@ class Transaction:
         """Apply the overlay to the live registry. MUST stay free of awaits."""
         k, removed = self.kernel, self._removed()
         changed = []
-        for key, b in self._overlay.items():
-            cur = k._services.get(key)
+        for (realm, key), b in self._overlay.items():
+            cur = realm.services.get(key)
             if b is None:
                 if cur is not None and cur.owner in removed:
-                    del k._services[key]
+                    del realm.services[key]
                     changed.append(keyname(key))
             else:
-                k._services[key] = b
+                realm.services[key] = b
+                b.tx = None  # the binding is live now
                 changed.append(keyname(key))
         for f in self._staged:
             f._tx = None
@@ -196,7 +203,6 @@ class Transaction:
                 siblings.insert(siblings.index(old), new)
         self._overlay.clear()
         self.state = "committed"
-        k._dirty = True
         k._trace("tx.commit", self.ctx.fiber, services=changed,
                  added=[f.label for f in self._staged], removed=[f.label for f in self._removals])
 
@@ -210,7 +216,7 @@ class Transaction:
         for f in reversed(self._removals):
             await f._dispose()
         # 3. reactivate everything that can run now
-        await k._settle(None)
+        await k._settle(None, full=True)
 
     async def _rollback(self, error: BaseException | None) -> None:
         self.error = error
@@ -221,4 +227,4 @@ class Transaction:
         self._overlay.clear()
         self.state = "rolled_back"
         self.kernel._trace("tx.rollback", self.ctx.fiber, error=repr(error))
-        await self.kernel._settle(None)
+        await self.kernel._settle(None, full=True)

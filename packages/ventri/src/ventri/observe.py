@@ -10,15 +10,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from .kernel import Kernel
 
 
-def _bindings(kernel: Kernel) -> list:
-    out = list(kernel._services.values())
-    for f in kernel._walk():
-        tx = f.tx
-        if tx is not None:
-            out += [b for b in tx._overlay.values() if b is not None and b not in out]
-    return out
-
-
 _SECRET = ("key", "token", "secret", "password")
 
 
@@ -30,9 +21,14 @@ def _redact(config: Any) -> Any:
 
 
 def snapshot(kernel: Kernel) -> dict[str, Any]:
-    bindings = _bindings(kernel)
+    realms: dict[str, Any] = {}
 
     def node(f: Fiber) -> dict[str, Any]:
+        if f.realm is not None and f.parent is not None and f.isolate:
+            realms[f.label] = {
+                "isolate": sorted(keyname(k) for k in f.isolate),
+                "services": {keyname(k): b.owner.label for k, b in f.realm.services.items()},
+            }
         return {
             "id": f.id,
             "name": f.name,
@@ -40,16 +36,20 @@ def snapshot(kernel: Kernel) -> dict[str, Any]:
             "staged": f.parent is not None and f.tx is not None,
             "config": _redact(f.raw_config),
             "inject": [keyname(k) for k in f.inject],
-            "provides": [keyname(b.key) for b in bindings if b.owner is f],
+            "scope": f.is_scope,
+            "provides": [keyname(b.key) for b in f._bindings],
             "tasks": sum(1 for e in f._effects if e.label.startswith("task:")),
             "effects": len(f._effects),
             "error": repr(f.error) if f.error else None,
+            "pending_reason": f.pending_reason,
             "children": [node(c) for c in f.children],
         }
 
+    fibers = node(kernel.fiber)
     return {
-        "fibers": node(kernel.fiber),
+        "fibers": fibers,
         "services": {keyname(k): b.owner.label for k, b in kernel._services.items()},
+        "realms": realms,
     }
 
 

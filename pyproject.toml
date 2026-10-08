@@ -38,3 +38,6 @@ extend-exclude = ["docs/build"]
 "tests/**" = ["S101", "BLE001", "ASYNC115"]
 "benchmarks/**" = ["S101", "T201"]
 "examples/**" = ["T201"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ventri", "ventri_std"]
