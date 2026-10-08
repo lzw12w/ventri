@@ -162,7 +162,11 @@ class AgentLoop:
             return
         self._last_time_note = t
         stamp = datetime.now(BEIJING).strftime("%Y-%m-%d %H:%M %a (UTC+8)")
-        self.builder.append(Message.system(f"[context] current time: {stamp}", tail="time"))
+        note = f"[context] current time: {stamp}"
+        schedule = getattr(getattr(self.provider, "prices", None), "schedule", None)
+        if schedule is not None:
+            note += f"; DeepSeek API pricing now: {'peak' if schedule.is_peak(now()) else 'off-peak (half price)'}"
+        self.builder.append(Message.system(note, tail="time"))
 
     async def _run(self, sink: Sink | None) -> TurnResult:
         b = self.budget

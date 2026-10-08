@@ -1,0 +1,29 @@
+name: deepseek-contract
+
+# DESIGN.md 8 (M2 exit criterion): DeepSeek contract tests against the real API,
+# nightly, small budget (< 0.01 USD per run). Runs at 17:30 UTC = 01:30 Beijing
+# (off-peak, half price). Needs the repository secret DEEPSEEK_API_KEY; without
+# it the live tests are skipped.
+on:
+  schedule:
+    - cron: "30 17 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: deepseek-contract
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --python 3.12 --locked
+      - name: Live contract tests
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: uv run pytest -m live -s -q -rs tests/agent/test_live_deepseek.py

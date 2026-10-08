@@ -67,6 +67,7 @@ async def test_time_notes_and_notices_are_appended_not_rewritten(tmp_path):
         assert is_prefix(a, b)
         tails = [m for m in b.messages if m.meta.get("tail") == "time"]
         assert len(tails) == 2 and "current time" in tails[1].content
+        assert "DeepSeek API pricing now:" in tails[1].content
 
 
 async def test_tool_set_change_waits_for_the_next_epoch(tmp_path):

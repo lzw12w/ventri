@@ -189,7 +189,7 @@ tasks:
   - id: t03
     category: schedule
     prompt: "Is it currently DeepSeek peak pricing time? Answer yes or no and why."
-    checks: [{answer_peak: true}, {tool_called: time.now}]
+    checks: [{answer_peak: true}]
   - id: t04
     category: schedule
     prompt: "When is Alice's budget draft due, according to my meeting notes?"
