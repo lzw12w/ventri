@@ -408,7 +408,7 @@ class FeishuChannel:
 
     def check(self) -> None:
         if not self.cfg.app_id or not self._secret():
-            raise ValueError("Feishu channel: app_id and app_secret are required "
+            raise ValueError("Feishu channel: app_id and app_secret are required -- run `va feishu setup` "
                              "(app_secret: \"${secret:feishu_app_secret}\" or $FEISHU_APP_SECRET)")
         if self.api is None and not sdk_available():
             raise RuntimeError(INSTALL_HINT)

@@ -105,6 +105,91 @@ class KeychainSecrets:
         return out.stdout.rstrip("\n") if out.returncode == 0 else None
 
 
+_SECRET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def secrets_dir() -> Path:
+    """``$VENTRI_HOME/secrets`` (default ``~/.ventri/secrets``)."""
+    home = os.environ.get("VENTRI_HOME")
+    return (Path(home) if home else Path("~/.ventri")).expanduser() / "secrets"
+
+
+class FileSecrets:
+    """``${secret:name}`` -> the file ``<dir>/<name>`` (default ``$VENTRI_HOME/secrets``),
+    one value per file, trailing newline stripped. For machines without a keychain.
+
+    Fails closed: a file that is not a regular file owned by the current user, or
+    that group/others can access (anything but ``0600``/``0400``), or a directory
+    that others can write, is an error -- never silently used or skipped."""
+
+    def __init__(self, directory: str | os.PathLike[str] | None = None) -> None:
+        self._directory = Path(directory).expanduser() if directory is not None else None
+
+    @property
+    def directory(self) -> Path:
+        return self._directory if self._directory is not None else secrets_dir()
+
+    def path(self, name: str) -> Path:
+        if not _SECRET_NAME.match(name):
+            raise ConfigError(f"invalid secret name {name!r} (letters, digits, '_', '-', '.')")
+        return self.directory / name
+
+    @staticmethod
+    def _check(p: Path, st: os.stat_result, *, is_dir: bool) -> None:
+        if os.name != "posix":  # pragma: no cover - POSIX permissions only
+            return
+        import stat as _stat
+
+        kind_ok = _stat.S_ISDIR(st.st_mode) if is_dir else _stat.S_ISREG(st.st_mode)
+        if not kind_ok:
+            raise ConfigError(f"secret store {p} is not a {'directory' if is_dir else 'regular file'}")
+        if st.st_uid != os.getuid():
+            raise ConfigError(f"secret store {p} is not owned by the current user")
+        bad = 0o022 if is_dir else 0o077
+        if st.st_mode & bad:
+            fix = "chmod 700" if is_dir else "chmod 600"
+            raise ConfigError(f"secret store {p} is accessible by other users ({fix} {p})")
+
+    def get(self, name: str) -> str | None:
+        if not _SECRET_NAME.match(name):
+            return None
+        p = self.directory / name
+        try:
+            fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            raise ConfigError(f"secret store {p}: {e.strerror or e}") from None
+        try:
+            self._check(self.directory, os.stat(self.directory), is_dir=True)
+            self._check(p, os.fstat(fd), is_dir=False)
+            with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as f:
+                return f.read().rstrip("\r\n")
+        finally:
+            os.close(fd)
+
+    def set(self, name: str, value: str) -> Path:
+        """Write ``value`` atomically with mode 0600 (directory 0700)."""
+        p = self.path(name)
+        d = p.parent
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == "posix":
+            os.chmod(d, 0o700)
+        tmp = d / f".{name}.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(value)
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, p)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return p
+
+
 class DictSecrets:
     def __init__(self, values: Mapping[str, str]) -> None:
         self.values = dict(values)
@@ -126,8 +211,9 @@ class ChainSecrets:
 
 
 def default_secrets() -> SecretStore:
-    """Keychain (service ``ventri``) on macOS, then ``VENTRI_SECRET_<NAME>``."""
-    return ChainSecrets(KeychainSecrets(), EnvSecrets())
+    """Keychain (service ``ventri``) on macOS, then ``VENTRI_SECRET_<NAME>``, then the
+    private file ``$VENTRI_HOME/secrets/<name>`` (:class:`FileSecrets`)."""
+    return ChainSecrets(KeychainSecrets(), EnvSecrets(), FileSecrets())
 
 
 def interpolate(value: Any, secrets: SecretStore, environ: Mapping[str, str] | None = None,
@@ -152,8 +238,9 @@ def interpolate(value: Any, secrets: SecretStore, environ: Mapping[str, str] | N
             secret = True
             v = secrets.get(name)
             if v is None:
-                raise ConfigError(f"{where}: secret {name!r} not found (keychain service 'ventri' "
-                                  f"or ${'VENTRI_SECRET_' + re.sub(r'\W', '_', name).upper()})")
+                raise ConfigError(f"{where}: secret {name!r} not found (keychain service 'ventri', "
+                                  f"${'VENTRI_SECRET_' + re.sub(r'\W', '_', name).upper()} or the file "
+                                  f"{secrets_dir() / name})")
             return v
         v = env.get(name, default)
         if v is None:

@@ -61,13 +61,13 @@ plugins:
       - use: ventri_agent.tools.inspect
   - use: ventri_agent.sessions
     config: {{ idle_timeout: 1800, retention_days: 7 }}
-  # Feishu / Lark bot (docs/feishu-setup.md): pip install 'ventri-agent[feishu]', then `va serve`.
-  # Disabled by default; it only connects under `va serve`. Empty allow_users = nobody may use it.
+  # Feishu / Lark bot: `va feishu setup` (scan a QR code) creates the bot and fills in this block;
+  # manual setup: docs/feishu-setup.md. It only connects under `va serve`; empty allow_users = nobody.
   # - use: ventri_agent.channels.feishu
   #   id: feishu
   #   config:
   #     app_id: cli_xxxxxxxxxxxxxxxx
-  #     app_secret: "${{secret:feishu_app_secret}}"   # keychain service 'ventri' or $VENTRI_SECRET_FEISHU_APP_SECRET
+  #     app_secret: "${{secret:feishu_app_secret}}"   # keychain 'ventri' / $VENTRI_SECRET_FEISHU_APP_SECRET / ~/.ventri/secrets
   #     domain: feishu                 # lark for larksuite.com
   #     allow_users: []                # your open_id (ou_...); message the bot once and it tells you
   #     allow_chats: []                # group chat_ids (oc_...) the bot may answer in
@@ -113,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     i = sub.add_parser("init", help="create ~/.ventri (config, persona, workspace) and store the API key")
     i.add_argument("--force", action="store_true", help="overwrite an existing ventri.yml")
     i.add_argument("--no-key", action="store_true", help="do not ask for the DeepSeek API key")
+    i.add_argument("--feishu", action="store_true", help="then create a Feishu / Lark bot (va feishu setup)")
     c = sub.add_parser("chat", help="interactive chat in the terminal")
     c.add_argument("--config", type=Path, default=None)
     c.add_argument("--profile", action="append", dest="profiles", default=None)
@@ -158,6 +159,24 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--profile", action="append", dest="profiles", default=None)
     sv.add_argument("--no-watch", action="store_true", help="do not hot-apply config edits")
     sv.add_argument("--verbose", "-v", action="store_true", help="log channel activity to stderr")
+    fs = sub.add_parser("feishu", help="Feishu / Lark bot: `va feishu setup` creates one by scanning a QR code")
+    fsub = fs.add_subparsers(dest="feishu_cmd", required=True)
+    fsetup = fsub.add_parser(
+        "setup", help="create a Feishu / Lark bot by scanning a QR code and enable it in ventri.yml",
+        description="Scan-to-create (Feishu's one-click agent app registration): shows a QR code, waits until "
+        "you scan and confirm it in the Feishu / Lark app, stores the App Secret (macOS keychain, else "
+        "$VENTRI_HOME/secrets/feishu_app_secret with mode 0600; never printed) and enables the Feishu channel in "
+        "ventri.yml with you (the scanner) as the only allowed user. A backup of ventri.yml is written first.")
+    fsetup.add_argument("--config", type=Path, default=None)
+    fsetup.add_argument("--domain", choices=["feishu", "lark"], default="feishu",
+                        help="feishu.cn or larksuite.com (a Lark account is detected automatically)")
+    fsetup.add_argument("--qr-png", type=Path, default=None, metavar="PATH", help="also write the QR code as PNG")
+    fsetup.add_argument("--json", action="store_true", help="JSON-lines events on stdout (qr/status/done/error)")
+    fsetup.add_argument("--minimal", action="store_true",
+                        help="ask only for the permissions Ventri uses instead of Feishu's agent template")
+    fsetup.add_argument("--secret-store", choices=["auto", "keychain", "file"], default="auto")
+    fsetup.add_argument("--timeout", type=float, default=None, help="seconds to wait for the scan (max ~600)")
+    fsetup.add_argument("--force", action="store_true", help="create a new bot even if one is configured")
     d = sub.add_parser("doctor", help="check the environment and configuration")
     d.add_argument("--config", type=Path, default=None)
     for name, when in LATER.items():
@@ -172,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     fn = {"init": cmd_init, "chat": cmd_chat, "run": cmd_run, "serve": cmd_serve, "sessions": cmd_sessions,
           "cost": cmd_cost,
-          "memory": cmd_memory, "tree": cmd_tree, "doctor": cmd_doctor}[args.cmd]
+          "memory": cmd_memory, "tree": cmd_tree, "doctor": cmd_doctor, "feishu": cmd_feishu}[args.cmd]
     from ventri_std.config import ConfigError
 
     try:
@@ -216,8 +235,32 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("API key: set DEEPSEEK_API_KEY (or VENTRI_SECRET_DEEPSEEK), or on macOS rerun `va init` "
               "to store it in the keychain and reference it as ${secret:deepseek}.")
     print(DATA_POLICY.format(home=h))
+    feishu = args.feishu
+    if not feishu and sys.stdin.isatty() and sys.stdout.isatty():
+        from .channels.feishu.wizard import current_feishu
+
+        if current_feishu(cfg) is None:
+            ans = input("Create a Feishu / Lark bot now by scanning a QR code? [y/N] ")
+            feishu = ans.strip().lower() in ("y", "yes")
+    if feishu:
+        rc = cmd_feishu(argparse.Namespace(feishu_cmd="setup", config=cfg, domain="feishu", qr_png=None,
+                                           json=False, minimal=False, secret_store="auto", timeout=None,
+                                           force=False))
+        if rc:
+            print("Feishu setup did not finish; run `va feishu setup` later.")
+    else:
+        print("Feishu / Lark bot: va feishu setup")
     print("next: va chat")
     return 0
+
+
+# ------------------------------------------------------------------- feishu
+def cmd_feishu(args: argparse.Namespace) -> int:
+    from .channels.feishu.wizard import Options, run_setup
+
+    opts = Options(config=_config_path(args.config), domain=args.domain, qr_png=args.qr_png, json=args.json,
+                   minimal=args.minimal, secret_store=args.secret_store, force=args.force, timeout=args.timeout)
+    return run_setup(opts)
 
 
 # --------------------------------------------------------------------- chat

@@ -69,7 +69,8 @@ uv run va chat                      # 流式输出、思考折叠、内联审批
 uv run va chat --fake script.json   # 离线：脚本化假模型（演示 / 测试，不需要 key）
 uv run va chat --continue           # 恢复最近的会话（进程重启后同样可恢复）
 uv run va sessions | va cost | va memory list|pending|search|confirm|forget|export|import | va tree | va doctor
-uv sync --extra feishu && uv run va serve   # 飞书机器人（长连接），配置见 docs/feishu-setup.md
+uv sync --extra feishu && uv run va feishu setup   # 扫码创建飞书机器人并写好配置（docs/feishu-setup.md）
+uv run va serve                                    # 飞书机器人上线（长连接）
 ```
 
 ```
@@ -97,7 +98,7 @@ uv sync --extra feishu && uv run va serve   # 飞书机器人（长连接），�
 | 记忆 | `memory.py` | SQLite FTS5（trigram，中文可用）；去重合并；敏感项待确认；Markdown 导出/导入；会话结束时用 cheap 路由抽取 |
 | 会话 | `sessions.py` | 每个会话 = `scope session:<id>`（隔离 SessionInfo/Budget/Grants/ContextBuilder/AgentLoop…）；JSONL 日志；空闲 30 分钟挂起、7 天保留后结束；崩溃 = 挂起，可从日志恢复 |
 | CLI | `channels/cli.py`、`cli.py` | `/think /cost /tree /memory /epoch /compact /retry /sessions /end /suspend /exit` |
-| 飞书 | `channels/feishu/`、`va serve` | 官方 SDK `lark-oapi` 长连接（独立线程，断线重建，退出发 CLOSE）；私聊 + 群聊（默认只响应 @机器人）；白名单失败关闭（未授权者收到自己的 open_id）；聊天 → 会话映射、重启后恢复；卡片原地更新进度（工具调用紧凑显示）、长回答分块；审批卡片（允许一次 / 本会话允许 / 拒绝，HMAC + 只有发起人可点、超时 = 拒绝、不可撤销工具无“本会话”）；去重、忽略自己与过期事件；斜杠命令复用 CLI。部分解析代码移植自 Hermes Agent（MIT） |
+| 飞书 | `channels/feishu/`、`va serve` | 官方 SDK `lark-oapi` 长连接（独立线程，断线重建，退出发 CLOSE）；私聊 + 群聊（默认只响应 @机器人）；白名单失败关闭（未授权者收到自己的 open_id）；聊天 → 会话映射、重启后恢复；卡片原地更新进度（工具调用紧凑显示）、长回答分块；审批卡片（允许一次 / 本会话允许 / 拒绝，HMAC + 只有发起人可点、超时 = 拒绝、不可撤销工具无“本会话”）；去重、忽略自己与过期事件；斜杠命令复用 CLI；`va feishu setup` 扫码创建应用（飞书“一键创建智能体应用”，App Secret 存钥匙串或 0600 文件、从不打印，扫码人自动成为唯一授权用户）。部分代码移植自 Hermes Agent 与官方 `lark-oapi`（MIT） |
 
 实测（2026-10-08，真实 API，`pytest -m live`）：6 轮 Agent 会话输入缓存命中率 **74.8%**，成本 $0.0011；
 30 个个人任务评测（`uv run python -m evals.agent.run`）通过 **29/30（96.7%）**，总成本 $0.041。
@@ -215,7 +216,7 @@ plugins:
     config: { path: ~/.ventri/trace/, rotate_mb: 64 }
   - use: mypkg.providers.deepseek
     id: ds
-    config: { api_key: "${secret:deepseek}", model: deepseek-flash }   # 钥匙串，或 $VENTRI_SECRET_DEEPSEEK
+    config: { api_key: "${secret:deepseek}", model: deepseek-flash }   # 钥匙串、$VENTRI_SECRET_DEEPSEEK 或 ~/.ventri/secrets/deepseek（0600）
   - group: tools
     plugins:
       - use: mypkg.tools.fs
@@ -269,5 +270,5 @@ write-local 及以上动作。真实 API 契约测试只在设置 `DEEPSEEK_API_
 - 插件**源码**修改不会被检测（开发模式代码重载不在 M1）；OpenTelemetry 导出与配置目录 git 账本在 M3；沙箱不在 M1；
 - `ventri apply` 无守护进程通道（见上）；
 - 只支持 asyncio；1.0 只支持 macOS（CI 以 macOS 为主，Linux 做回归）。
-- Agent（M2）：本地 Web UI 在 M4；飞书渠道已可用（`va serve`），但尚未用真实飞书应用联调，暂不支持图片/文件消息；
+- Agent（M2）：本地 Web UI 在 M4；飞书渠道已可用（`va feishu setup` + `va serve`），但尚未用真实飞书应用联调（扫码创建后是否还需在后台发布版本未核实），暂不支持图片/文件消息；
   MCP、沙箱、Skills、例行任务与自我演化在 M3（`va propose/history/rollback` 已保留并以退出码 2 提示）；`shell.run` 不是沙箱（只限工作目录、超时、剥离敏感环境变量）；没有待审批队列（无渠道 = 拒绝）。

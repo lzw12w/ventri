@@ -13,6 +13,7 @@ dev = [
     "ruff>=0.6",
     "pyright>=1.1.380",
     "lark-oapi>=1.7,<2",   # the Feishu channel's SDK-contract tests (ventri-agent[feishu])
+    "qrcode>=7.4,<9",      # `va feishu setup` QR rendering tests (ventri-agent[feishu])
 ]
 
 [tool.uv]
