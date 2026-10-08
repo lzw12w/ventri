@@ -11,7 +11,7 @@ Ventri 是一个小而可运行的插件内核（库代码约 1000 行有效代�
 设计为原创实现（只借鉴 cordis 的语义：Context / 服务 / inject / Fiber 生命周期 / effect），未参考任何现有 Python 移植。
 后续计划作为 DeepSeek 个人 Agent 的底座。
 
-> **项目路线与完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)（PDF：[`docs/DESIGN.pdf`](docs/DESIGN.pdf)）。**
+> **项目路线与完整设计见 [`docs/DESIGN.md`](docs/DESIGN.md)。** 许可证：MIT（见 [`LICENSE`](LICENSE)）。
 
 ## 快速开始
 

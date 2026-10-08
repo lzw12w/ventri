@@ -3,6 +3,7 @@ name = "ventri"
 version = "0.1.0"
 description = "cordis-inspired plugin kernel with structured concurrency and transactional plugin changes"
 requires-python = ">=3.11"
+license = { text = "MIT" }
 dependencies = ["anyio>=4.4"]
 
 [project.optional-dependencies]

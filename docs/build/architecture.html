@@ -37,12 +37,12 @@ h1 small{font-size:18px;font-weight:400;color:#5b6475;margin-left:16px}
 svg{position:absolute;left:0;top:0}
 .al{font-size:13px;fill:#3d4556;font-family:"Noto Sans CJK SC",sans-serif}
 </style></head><body>
-<h1>Ventri 总体架构<small>Ventri Core 内核 + Ventri Agent（DeepSeek 优先的个人 Agent）· 2026-10-08</small></h1>
+<h1>Ventri 总体架构<small>Ventri Core 内核 + Ventri Agent（DeepSeek 优先的个人 Agent）· 2026-10-08 · v1.1</small></h1>
 
 <!-- left column -->
 <div class="box" style="left:30px;top:160px;width:230px;height:200px">
   <h3>👤 用户</h3>
-  <p>终端 · 浏览器 · 飞书 · Telegram</p>
+  <p>macOS 终端 · 浏览器 · 飞书 · Telegram</p>
   <p style="margin-top:8px">对话、审批卡片、<br>批准 / 回滚演化提案</p>
   <p style="margin-top:8px;color:#c8553d"><b>批准只来自人类渠道</b></p>
 </div>
@@ -58,7 +58,7 @@ svg{position:absolute;left:0;top:0}
 </div>
 
 <!-- host frame -->
-<div class="abs frame" style="left:282px;top:118px;width:1050px;height:1100px"><div class="frame-label">宿主进程 · 单机单用户 · Python 3.12+ · anyio 结构化并发（插件树 = 任务树 = 作用域树）</div></div>
+<div class="abs frame" style="left:282px;top:118px;width:1050px;height:1100px"><div class="frame-label">宿主进程 · macOS（1.0 唯一平台）· 单机单用户 · Python 3.12+ · anyio 结构化并发（插件树 = 任务树 = 作用域树）</div></div>
 
 <div class="band L4" style="top:160px;height:140px">
   <div class="tag"><b>L4 渠道</b><span>ventri-agent</span></div>
@@ -102,7 +102,7 @@ svg{position:absolute;left:0;top:0}
   <div class="tag"><b>L1 标准插件</b><span>ventri-std</span></div>
   <div class="body">
     <div class="chip">配置加载器<i>YAML → 合并 → diff → 单事务</i></div>
-    <div class="chip">profiles · secrets<i>keyring · 自动打码</i></div>
+    <div class="chip">profiles · secrets<i>macOS 钥匙串 · 自动打码</i></div>
     <div class="chip">沙箱宿主<i>卫星进程 · 能力代理</i></div>
     <div class="chip">调度器<i>cron · 峰谷感知</i></div>
     <div class="chip">trace 导出<i>JSONL · OpenTelemetry</i></div>
@@ -144,8 +144,8 @@ svg{position:absolute;left:0;top:0}
 <div class="box sat" style="left:1420px;top:700px;width:350px;height:255px">
   <h3>🧪 卫星子进程（OS 沙箱）</h3>
   <p><b>T2 插件：模型生成的代码</b><br>同语义 ventri 微内核<br>
-  只能经能力代理访问宿主服务<br>默认无网络 · 无 home · 资源限额</p>
-  <p style="margin-top:6px">Linux: bubblewrap + seccomp + landlock<br>macOS: sandbox-exec<br>其他平台：不运行 T2</p>
+  只能经能力代理访问宿主服务<br>无网络（1.0）· 无 home · 资源限额</p>
+  <p style="margin-top:6px">macOS: sandbox-exec + Seatbelt 配置 + rlimit<br>Linux / Windows：1.0 之后<br>不支持的平台不运行 T2</p>
 </div>
 <div class="legend">
   <b>依赖方向</b>：只能向下（L4 → L0）。L0 不知道 “Agent”。<br>

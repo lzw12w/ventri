@@ -4,7 +4,9 @@
 >
 > **适用范围**：Ventri Core（内核）、ventri-std（标准插件）、Ventri Agent（DeepSeek 优先的个人 Agent）
 >
-> **约定**：本文中的“**决定**”是已拍板的路线；“**目标**”是需要基准测试验证的数字；“**估算**”是工期估计，不是承诺。图的 PNG 版本位于 `docs/img/`，源码为文中的 Mermaid 代码块，由 `docs/build/build.py` 渲染。
+> **约定**：本文中的“**决定**”是已拍板的路线；“**目标**”是需要基准测试验证的数字；“**估算**”是工期估计，不是承诺。每张图在文中以 Mermaid 源码给出，并附同名 PNG（`docs/img/`，由 `docs/build/build.py` 渲染）。
+>
+> **修订**：2026-10-08 v1.1 —— 记录 Jeff 对第 10 节待决问题的答复（许可证、投入、数据策略、平台、T2 网络权限），新增 6.1 Harness 生态兼容，更新 PyPI 占位状态。
 
 ---
 
@@ -23,7 +25,7 @@
 | 一个**长期运行进程**的运行时内核：插件树 = 任务树 = 作用域树，任何变更都可原子提交、精确回滚、可观测 | 不是 “Python 版 cordis”：**不追求** cordis API 兼容，不运行 JS 插件，不兼容 `cordis.yml` |
 | 一个**可自我观察、可受控自我演化**的个人 Agent：它能看到自己的插件树，能提出新插件/配置变更，经沙箱试运行与用户批准后事务化生效，一键回滚 | 不是 LLM 编排库（LangGraph/PydanticAI 这类可以作为 Ventri 插件被托管） |
 | **DeepSeek 优先**：深度利用思考模式、上下文硬盘缓存、峰谷定价、strict 工具调用 | 不是 DeepSeek 绑定：Provider 接口支持任意 OpenAI 兼容端点 |
-| **本地优先、单用户、单机**：数据在 `~/.ventri/`，格式为 YAML / JSONL / SQLite / Markdown | 不是多租户 SaaS、不是分布式运行时、不是工作流引擎（Temporal/Airflow） |
+| **本地优先、单用户、单机**：数据在 `~/.ventri/`，格式为 YAML / JSONL / SQLite / Markdown；**1.0 只支持 macOS** | 不是多租户 SaaS、不是分布式运行时、不是工作流引擎（Temporal/Airflow） |
 | 有**安全边界**：模型生成的插件只在子进程沙箱中运行，按能力清单访问服务 | 不提供“进程内安全 exec”——Python 进程内没有可信的隔离，我们不假装有 |
 
 ### 1.3 目标用户（按优先级）
@@ -38,7 +40,7 @@
 
 ```text
 $ pipx install ventri-agent
-$ va init                       # 生成 ~/.ventri/ventri.yml，写入 DeepSeek key（存系统 keyring）
+$ va init                       # 生成 ~/.ventri/ventri.yml，写入 DeepSeek key（存 macOS 钥匙串）
 $ va chat                       # CLI 对话：流式输出、思考过程折叠、工具调用前弹出审批
 > 帮我把 ~/notes/周报 里本周的内容整理成提纲，发到飞书
   [审批] tools.fs.read ~/notes/周报/*  (只读)   → 本会话允许
@@ -77,7 +79,7 @@ $ va history && va rollback 17  # 演化账本；一键回滚 = 反向事务，�
 
 ![Ventri 总体架构（内核 + Agent）](img/architecture.png)
 
-全景图从下到上是五层，外加两条横切关注点（可观测性、安全/能力）和一个进程边界（沙箱卫星进程）：
+全景图从下到上是五层，外加两条横切关注点（可观测性、安全/能力）和一个进程边界（沙箱卫星进程）。1.0 的运行平台只有 macOS（见 10.1 D5）：
 
 | 层 | 发行包 | 内容 | 依赖 |
 |---|---|---|---|
@@ -143,6 +145,8 @@ block-beta
   class k,f,r,t,e,tr c0
 ```
 
+*图：依赖分层（PNG：[img/layers.png](img/layers.png)）*
+
 **决定**：依赖只能向下。L0 不知道“Agent”的存在；L2 不知道具体渠道；渠道只通过 `ChannelMessage` / `ApprovalRequest` 事件与运行时交互。
 
 ### 3.3 运行时插件树（一个典型进程）
@@ -187,6 +191,8 @@ flowchart LR
   classDef ch fill:#c8553d,color:#fff
   classDef sc fill:#efe6ff,color:#2d1b69,stroke:#6b4fbb
 ```
+
+*图：运行时插件树（PNG：[img/fiber-tree.png](img/fiber-tree.png)）*
 
 实线是父子关系（同时是任务树与回收顺序），虚线是服务依赖。会话是作用域（scope）：`session:a1` 结束时，其下的日志写入器、授权、Agent 循环及其所有任务被确定性回收；`mcp:github` 子进程崩溃只会让它自己 `FAILED`，依赖它的工具自动下线，其它一切照常。
 
@@ -267,6 +273,8 @@ stateDiagram-v2
   DISPOSED --> [*]
 ```
 
+*图：Fiber 生命周期状态机（PNG：[img/fiber-state.png](img/fiber-state.png)）*
+
 规则（已由 M0 测试覆盖）：
 
 - **依赖方先拆、服务后删**：移除服务前先卸载依赖它的插件，依赖方的清理代码仍能使用该服务。
@@ -317,6 +325,8 @@ sequenceDiagram
     T->>C: tx.rollback + 原异常
   end
 ```
+
+*图：事务流程（PNG：[img/tx-seq.png](img/tx-seq.png)）*
 
 #### 4.5.2 保证（M0 已实现并测试）
 
@@ -379,7 +389,7 @@ plugins:
   - use: ventri_agent.providers.deepseek
     id: ds
     config:
-      api_key: ${secret:deepseek}      # 系统 keyring；也支持 ${env:DEEPSEEK_API_KEY}
+      api_key: ${secret:deepseek}      # macOS 钥匙串；也支持 ${env:DEEPSEEK_API_KEY}
       routes:
         default: { model: deepseek-flash,  thinking: true,  effort: high }
         plan:    { model: deepseek-v4-pro, thinking: true,  effort: max  }
@@ -424,6 +434,8 @@ flowchart TB
   w["文件监视 (去抖)<br/>或 va apply"] -.-> y
 ```
 
+*图：声明式配置加载流程（PNG：[img/config-apply.png](img/config-apply.png)）*
+
 规则（决定）：
 
 - **稳定 id**：显式 `id`，否则为 `use` + 在父节点中的序号。diff 以 id 为准；`use` 变化视为替换。
@@ -460,19 +472,19 @@ flowchart TB
 |---|---|---|---|
 | **T0 可信** | 内核、ventri-std、ventri-agent 内置插件、用户 pip 安装并在配置中启用的包 | 进程内 | 无（用户已决定信任） |
 | **T1 本地** | 用户自己写的 `~/.ventri/plugins/*.py` | 进程内 | 必须声明能力清单；越权访问在**开发模式**告警、**正常模式**拒绝（进程内只是“护栏”，不是安全边界） |
-| **T2 不可信** | **模型生成**或来源未知的插件代码 | **卫星子进程 + OS 沙箱** | 只能通过能力代理访问宿主服务；默认无网络、无 home 目录、资源受限 |
+| **T2 不可信** | **模型生成**或来源未知的插件代码 | **卫星子进程 + macOS 沙箱（Seatbelt）** | 只能通过能力代理访问宿主服务；**无网络**（1.0 范围内不开放，见下）、无 home 目录、资源受限 |
 
 **能力清单**（随插件提交，演化提案必须携带）：
 
 ```yaml
 # capability manifest
-name: rss-digest
+name: weekly-review
 tier: T2
 services:
   ToolRegistry: [register]           # 只能注册工具，不能调用他人工具
   LongTermMemory: [search]           # 只读
 events: { emit: [], on: [routine.tick] }
-net: [ "https://*.substack.com", "https://hnrss.org" ]
+net: []                              # 1.0：T2 一律无网络；字段保留，语义待定
 fs: { read: [], write: ["$PLUGIN_DATA"] }
 limits: { cpu_s: 30, mem_mb: 256, wall_s: 120 }
 ```
@@ -495,14 +507,18 @@ flowchart TB
     code --> mini
   end
   mini <-->|"JSON-RPC over stdio<br/>服务代理 / 事件订阅"| sf
-  os["Linux: bubblewrap + seccomp + landlock<br/>macOS: sandbox-exec<br/>其他: 拒绝运行 T2"] -.-> sat
+  os["macOS: sandbox-exec (Seatbelt 配置)<br/>+ rlimit / 独立临时目录 / 无网络<br/>Linux / Windows: 1.0 后"] -.-> sat
 ```
+
+*图：沙箱与能力代理（PNG：[img/sandbox.png](img/sandbox.png)）*
 
 - **决定**：T2 的唯一边界是**进程 + OS 沙箱**；Python 进程内的 restricted exec / AST 白名单**不被视为安全机制**（Harness 早期 `cordis_mount` 在非隔离 VM 中允许模型写插件，后收敛为只读 inspect，是前车之鉴）。
 - 卫星进程内运行同一套 ventri 微内核，因此插件写法与 T0 相同，迁移只改清单。
 - 服务调用经代理序列化（JSON），只支持“方法调用 + 事件”形态的服务接口；需要传递 Python 对象的服务不能暴露给 T2。
 - 卫星崩溃/超限 → 宿主侧 satellite fiber `FAILED`，与普通插件崩溃语义一致。
-- **不支持的平台不降级运行 T2**（Windows 1.0 前只支持 T0/T1）。
+- **平台（决定）**：1.0 **只支持 macOS**。T2 沙箱后端 = `sandbox-exec` + 按插件生成的 Seatbelt 配置（默认拒绝；只放行插件数据目录与 RPC 管道），配合 `setrlimit`、独立临时目录与清空的环境变量；若 M3 评估发现更合适的 macOS 原生机制，可替换后端，接口不变。Linux（bubblewrap/seccomp/landlock）与 Windows 推迟到 1.0 之后；在不支持的平台上**不降级运行 T2**。
+- **已知约束**：`sandbox-exec` 被 Apple 标记为弃用，但目前仍可用（见 R13）；沙箱后端藏在 `SandboxBackend` 接口之后，便于替换。
+- **T2 网络权限（推迟决策）**：1.0 范围内 T2 插件**完全没有网络访问**；清单中的 `net` 字段保留但必须为空。是否以及如何开放（域名白名单、首用审批等）留待 1.0 之后决定。需要联网的能力只能由 T0/T1 插件或 MCP 服务器提供，并经权限引擎。
 
 ### 4.12 热重载策略与极限
 
@@ -570,6 +586,8 @@ sequenceDiagram
   L-->>U: 最终回答 + 成本
 ```
 
+*图：Agent 单轮执行时序（PNG：[img/agent-turn.png](img/agent-turn.png)）*
+
 请求布局遵循 5.3 节：稳定前缀 + 只追加历史 + 尾部动态块，工具集在一个 epoch 内冻结；每轮结束向渠道报告成本与缓存命中率。
 
 **预算**（每会话 `Budget` 服务，会话 realm 隔离）：最大步数（默认 40）、最大工具调用、最大 token、最大费用（默认每轮 ¥2 等值）、墙钟时间。耗尽即以“已完成部分 + 下一步建议”结束本轮。
@@ -630,7 +648,8 @@ class ModelProvider(Protocol):
 
 - **短期记忆** = 会话 realm 内的 `SessionLog`（JSONL 只追加，可恢复）+ `WorkingMemory`（当前任务笔记/计划，模型可通过工具读写）。会话结束随 scope 回收，日志留存。
 - **长期记忆** = 根 realm 的 `LongTermMemory` 服务；默认实现 SQLite + FTS5，可选 `sqlite-vec` 向量检索（extras）。条目类型：`fact`、`preference`、`episode`（会话摘要）、`procedure`（可复用做法）；每条带来源（会话 id、消息 id）、时间、置信度、敏感标签。
-- **写入路径**：会话结束（或空闲 30 分钟）时，cheap 路由 + JSON 输出抽取候选记忆 → 去重/合并 → 写入并在下次会话开头提示“我记住了…”；用户可 `/memory` 查看、编辑、遗忘。敏感标签（健康、财务、凭据形态）条目默认需确认才写入。
+- **写入路径**：会话结束（或空闲 30 分钟）时，cheap 路由 + JSON 输出抽取候选记忆 → 去重/合并 → 写入并在下次会话开头提示“我记住了…”；用户可 `/memory` 查看、编辑、遗忘。敏感标签（健康、财务、凭据形态）条目默认需确认才写入（这是用户对记忆内容的控制，不是数据出境限制）。
+- **数据策略（决定）**：所有数据（对话、工具结果、记忆）**都允许发送到 DeepSeek API**。M2 不做“敏感会话路由到本地模型”；OpenAI 兼容适配器可连本地模型，作为以后的可选能力，不在路线图中承诺。
 - **读取路径**：会话开始选 top-K 进入段 ③；会话中通过 `memory.search` 工具按需检索（结果进入尾部，缓存友好）。
 - **导出**：`va memory export` 输出 Markdown，用户可手工编辑后导入。
 
@@ -673,6 +692,8 @@ stateDiagram-v2
   Disposed --> [*]
 ```
 
+*图：会话作用域生命周期（PNG：[img/session-lifecycle.png](img/session-lifecycle.png)）*
+
 - 挂起（Suspended）= scope 被 dispose，仅保留日志；恢复 = 新 scope + 日志重放（不调用模型）。因此内存中只存在活跃会话。
 - 会话内任何插件/任务崩溃只让该会话 fiber 失败，渠道收到错误提示并可 `/retry`；其它会话不受影响。
 
@@ -710,6 +731,8 @@ flowchart TB
   o -. 一键回滚 .-> rb["反向事务 → 快照逐字段恢复"]
 ```
 
+*图：受控自我演化流程（PNG：[img/evolution.png](img/evolution.png)）*
+
 - **演练模式（dry-run 的副作用对策，对应 N1）**：试运行期间，`intercept(ToolCall)` 把 `external` 及以上风险的调用替换为“记录并返回模拟结果”，报告中列出“如果生效，它会做什么”。
 - **一键回滚** = 对账本条目做反向配置补丁，作为一个事务应用；对配置补丁类，回滚后 `snapshot()` 与提案前相等（M3 验收测试）。
 - **频率限制**：每天最多 3 个待批提案；被拒的同类提案 30 天内不再提出。
@@ -729,11 +752,25 @@ flowchart TB
 | 类型化服务访问 | `ctx.get(Type)` + 签名注入 + stub | TS 声明合并 | TS 声明合并 | 弱 | 部分 | ✅（强项） |
 | 声明式配置热应用 | YAML → diff → 单事务 | cordis.yml + loader | 一切皆 cordis.yml 中的一行 | 少见 | 配置文件 | ❌ |
 | 可观测性 | 稳定 trace schema、JSONL/OTel、Agent 自省 | 有限 | inspect 工具（只读） | ❌ | 日志 | ❌ |
-| 模型代码安全边界 | 子进程 + OS 沙箱 + 能力清单 | ❌ | 曾允许非隔离 VM 挂载 → 收敛为只读 | ❌ | ❌ | ❌ |
+| 模型代码安全边界 | 子进程 + macOS 沙箱 + 能力清单（1.0） | ❌ | 曾允许非隔离 VM 挂载 → 收敛为只读 | ❌ | ❌ | ❌ |
 | 受控自我演化 | ✅ 提案 → 试运行 → 审批 → 事务 → 回滚 | ❌ | ❌ | ❌ | ❌ | ❌ |
 | API 稳定性 | 0.x 期间按里程碑冻结，1.0 起 semver | rc，不稳定 | 跟随 DeepSeek 产品，与上游分叉 | 不稳定 | 相对稳定 | 稳定 |
 
 **结论**：我们向 cordis 借鉴语义（Context / 服务 / inject / Fiber / effect），向 Harness 借鉴“一切皆配置行、会话即作用域、profile 叠加”的产品形态；真正的差异化是 **结构化并发 + 事务回滚 + 安全边界 + 受控演化** 这一组合，以及 Python 生态位。与 LangGraph、PydanticAI 等 Agent 编排库不竞争：它们解决“一次推理流程怎么编排”，Ventri 解决“一个长期运行的 Agent 进程怎么组装、变更、隔离与观察”，它们可以作为 Ventri 插件运行。
+
+### 6.1 与 DeepSeek Harness 生态的兼容
+
+**决定**：不兼容 Harness 的运行时，复用它的**资产**。
+
+| 资产 | 能否复用 | 方式 | 时间 |
+|---|---|---|---|
+| **TS 插件**（cordis 插件、`dsh-tool-*` 等） | ❌ 不能直接运行 | 运行时不同（Node + cordis fiber vs Python + anyio），API 与生命周期都不能互通 | — |
+| **MCP 服务器** | ✅ **主路径** | Harness 生态里以 MCP 服务器形式提供的工具，经 5.5 的 MCP 桥直接接入（配置一行即可），工具调用照常过权限引擎 | M3 |
+| **Skills**（SKILL.md 风格，纯文本） | ✅ 若是纯文本 | 直接放进 `~/.ventri/skills/`，由 Skills 加载器读取；带脚本的 Skill 按其脚本另行评估 | M3 |
+| **工具 schema / 提示词 / Agent 预设文本** | ✅ 手工或脚本移植 | JSON Schema 工具定义改写为 strict 兼容格式；persona / 提示词作为 `personas/*.md` | 随时 |
+| **TS 插件（桥接）** | ⏳ 可选，1.0 之后 | Node 子进程里运行一个最小 cordis 宿主，把其工具以 JSON-RPC 暴露为一个卫星 fiber（信任级别按来源定为 T1/T2） | 1.0 后 |
+
+**待核实**（M3 前完成，结果写入 ADR）：Harness 中哪些工具是 MCP 服务器、哪些只是进程内 cordis 插件；其 Skill 目录格式与通用 SKILL.md 约定的差异；仓库许可证是否允许复用提示词与 schema；Node 桥接所需的 `@deepseek-ai/cordis` API 面是否稳定。`cordis.yml` 导入器**不做**。
 
 ---
 
@@ -743,9 +780,9 @@ flowchart TB
 
 | PyPI 名 | 导入名 | 内容 | 依赖 | 状态 |
 |---|---|---|---|---|
-| `ventri` | `ventri` | 内核 | `anyio` | 2026-10-08 核查未被占用 |
-| `ventri-std` | `ventri_std` | 标准插件 + `ventri` CLI | `ventri`；extras：`[otel]` `[watch]` `[sandbox]` | 未被占用 |
-| `ventri-agent` | `ventri_agent` | Agent 运行时、内置插件、渠道、`va` CLI | `ventri-std`, `httpx`, `pydantic>=2`, `mcp`；extras：`[web]` `[feishu]` `[telegram]` `[vec]` | 未被占用 |
+| `ventri` | `ventri` | 内核 | `anyio` | ✅ 已占位（0.0.1，2026-10-08 发布） |
+| `ventri-std` | `ventri_std` | 标准插件 + `ventri` CLI | `ventri`；extras：`[otel]` `[watch]` `[sandbox]` | ⏳ 尚未占位（2026-10-08 仍可注册） |
+| `ventri-agent` | `ventri_agent` | Agent 运行时、内置插件、渠道、`va` CLI | `ventri-std`, `httpx`, `pydantic>=2`, `mcp`；extras：`[web]` `[feishu]` `[telegram]` `[vec]` | ✅ 已占位（0.0.1，2026-10-08 发布） |
 
 ```text
 ventri/                      # 仓库根（当前原型所在）
@@ -778,19 +815,20 @@ ventri/                      # 仓库根（当前原型所在）
 
 - **CLI**：`ventri`（来自 ventri-std：`run / apply / tree / doctor / stubgen`）；`va`（来自 ventri-agent：`init / chat / serve / propose / history / rollback / memory`）。
 - **插件发现**：entry point 组 `ventri.plugins`；1.0 前不做插件市场，只维护一个索引页。
+- **平台**：1.0 只支持 macOS（建议 macOS 14+，Apple Silicon 为主要测试目标，最低版本在 M1 确认）；Linux、Windows 推迟到 1.0 之后。内核是纯 Python，CI 可顺带在 Linux 上跑内核测试作回归信号，但不构成支持承诺。
 - **版本与兼容**：Python ≥ 3.12；0.x 期间每个里程碑末冻结一次 API 并写迁移说明；1.0 起 semver，trace schema 与配置 schema 各自带版本号。
-- **许可证**：建议 MIT（与 cordis 生态一致），待确认（见第 10 节）。
+- **许可证（决定）**：MIT，仓库根目录 `LICENSE`（Copyright (c) 2026 Jeff / Ventri contributors）。
 
 ---
 
 ## 8 路线图
 
-**工期假设**：约 1 名全职当量（Jeff + Agent 辅助）。所有工期均为**估算**，置信度随距离递减；每个里程碑以**退出标准**而非日期为准。
+**工期假设（已确认）**：Jeff 全职投入（约 1 名全职当量，Agent 辅助）。所有工期均为**估算**，置信度随距离递减；每个里程碑以**退出标准**而非日期为准。
 
 <!-- fig: roadmap -->
 ```mermaid
 gantt
-  title Ventri 路线图 (估算, 约 1 名全职当量)
+  title Ventri 路线图 (估算, 全职投入)
   dateFormat YYYY-MM-DD
   axisFormat %Y-%m
   section M0 原型
@@ -821,6 +859,8 @@ gantt
   1.0 发布                     :milestone, after m4c, 0d
 ```
 
+*图：路线图（估算）（PNG：[img/roadmap.png](img/roadmap.png)）*
+
 ### M0 — 原型（✅ 已完成，2026-10-08）
 
 - 交付：Kernel/Context/Fiber/事务/观测，约 1000 行有效代码；24 个测试 × asyncio/trio = 48 通过；混沌测试 40 个种子；demo。
@@ -836,7 +876,7 @@ gantt
 4. stop-first 替换、dry-run 事务、事务元数据与超时；
 5. 签名注入、可选依赖、`Secret[T]`、`ventri stubgen`；事件优先级、类型化事件、拦截器；
 6. trace schema v1 + JSONL sink；
-7. monorepo + uv workspace、CI（3.12/3.13/3.14 × asyncio/trio）、hypothesis 属性测试、benchmarks；PyPI 占位注册 `ventri` / `ventri-std` / `ventri-agent`；发布 `ventri 0.2.0a1`。
+7. monorepo + uv workspace、CI（macOS runner 为主；3.12/3.13/3.14 × asyncio/trio）、hypothesis 属性测试、benchmarks；补占位 `ventri-std`（`ventri`、`ventri-agent` 已于 2026-10-08 占位）；发布 `ventri 0.2.0a1`。
 
 退出标准：
 
@@ -862,11 +902,11 @@ gantt
 
 ### M3 — 沙箱 + 自我演化 + MCP（估算 9–10 周）
 
-交付：卫星子进程运行时（同语义微内核 + JSON-RPC）；能力清单与代理；OS 沙箱后端（Linux bubblewrap+seccomp+landlock，macOS sandbox-exec）；MCP 桥（stdio + Streamable HTTP）；Skills；调度器与例行任务（谷时延后）；日历工具；演化管理器（提案、静态检查、dry-run/沙箱试运行、演练模式、审批、账本、回滚、观察期）；OTel 导出；可选 Responses 格式适配。
+交付：卫星子进程运行时（同语义微内核 + JSON-RPC）；能力清单与代理；macOS 沙箱后端（sandbox-exec + Seatbelt 配置 + rlimit；T2 无网络）；MCP 桥（stdio + Streamable HTTP）；Skills；调度器与例行任务（谷时延后）；日历工具；演化管理器（提案、静态检查、dry-run/沙箱试运行、演练模式、审批、账本、回滚、观察期）；OTel 导出；可选 Responses 格式适配。
 
 退出标准：
 
-- [ ] 沙箱逃逸测试集（文件系统、网络、环境变量、进程、资源耗尽、RPC 越权）在 Linux 与 macOS 全部通过；外部人员做一次安全审阅；
+- [ ] 沙箱逃逸测试集（文件系统、网络必须完全不可达、环境变量、进程、资源耗尽、RPC 越权）在 macOS 上全部通过；外部人员做一次安全审阅；
 - [ ] 10 个端到端演化场景（3 Skill、4 配置补丁、3 T2 插件）全部走通，回滚后快照与提案前相等；
 - [ ] 测试证明：模型输出无法构成批准；提案无法修改权限策略或能力上限；
 - [ ] 5 个常用 MCP 服务器（文件系统、GitHub、浏览器类、数据库类、搜索类）可用，崩溃自动下线/恢复；
@@ -881,12 +921,12 @@ gantt
 - [ ] Jeff 之外 ≥ 20 名周活用户（P1 画像），≥ 5 个第三方插件；
 - [ ] 内核、配置 schema、trace schema、插件 API 冻结；
 - [ ] 连续 30 天无 P0 缺陷；从 0.x 的升级路径有文档与自动迁移；
-- [ ] 1.4 节的完成态体验全部可演示。
+- [ ] 1.4 节的完成态体验在 macOS 上全部可演示；安装文档只覆盖 macOS。
 
 ### 里程碑之间的决策点（Go / No-Go）
 
 - **M2 结束**：若自用两周中“事务/作用域/可观测”没有带来可感知的价值（例如热改配置、会话隔离、诊断问题），则冻结内核新特性，资源全部转向 Agent 体验。
-- **M3 中期**：若 macOS 沙箱后端无法达到逃逸测试要求，T2 在 macOS 上推迟到 1.0 之后，不降级运行。
+- **M3 中期**：若 macOS 沙箱后端无法达到逃逸测试要求，T2（模型生成代码）推迟到 1.0 之后，不降级运行；1.0 的自我演化只包含 Skill 与配置补丁。
 - **M4 开始**：若外部用户 < 5，推迟生态工作，优先补齐用户反馈的 Agent 能力。
 
 ---
@@ -903,25 +943,41 @@ gantt
 | R6 | **自我演化产出低质或危险变更** | 中 / 高 | 人工审批硬门槛；dry-run + 演练模式；能力上限不可被提案修改；频率限制；观察期自动禁用；一键回滚 |
 | R7 | **提示注入**（网页、文件、MCP 结果中夹带指令） | 高 / 高 | 工具结果标注来源并置于尾部数据块；有后果动作一律经权限引擎；红队用例纳入 M2 退出标准 |
 | R8 | **成本失控**（长上下文、思考 max、循环调用） | 中 / 中 | 每会话/每日预算；缓存友好布局；谷时调度；`/cost` 可见；超预算即停 |
-| R9 | **隐私与数据出境**（对话与记忆发送到第三方 API） | 中 / 中 | `va init` 明示；敏感标签记忆默认不进前缀；可为敏感会话路由到本地 OpenAI 兼容模型 |
+| R9 | **隐私与数据出境**（对话与记忆发送到第三方 API） | 中 / 中 | 已决定接受：所有数据可发送到 DeepSeek API；`va init` 明示这一点；本地模型路由是以后的可选项，不在路线图中 |
 | R10 | **范围蔓延**（个人 Agent 功能无穷） | 高 / 中 | 本文第 1.2 / 8 节为准；新增需求先写 ADR 并指定里程碑；M2 工具清单封顶 |
 | R11 | **单人维护（巴士因子 = 1）** | 高 / 中 | 测试与 ADR 固化语义；文档优先；模块边界清晰便于贡献者介入 |
 | R12 | **双后端（asyncio/trio）维护成本** | 低 / 低 | 只对内核承诺双后端；若 M1 中成本超出预期，降级为“trio 尽力支持” |
+| R13 | **macOS 唯一平台**：`sandbox-exec` 已被 Apple 标记弃用、未来版本可能变化；排除 Linux 服务器用户 | 中 / 中 | 沙箱藏在 `SandboxBackend` 接口后；每个 macOS 大版本跑逃逸测试；Linux 后端在 1.0 后按需求排期；内核纯 Python，不绑定平台 |
 
 ---
 
-## 10 待决问题（需要 Jeff 拍板）
+## 10 决策记录与待决问题
 
-1. **许可证**：MIT（建议，与 cordis 生态一致）还是 Apache-2.0（含专利授权）？
-2. **投入假设**：路线图按约 1 名全职当量估算；实际是全职还是业余？这会把 1.0 的估算从 2027 年中推到 2027 年底以后。
-3. **名称与占位**：是否在 M1 开始时立即在 PyPI 占位注册 `ventri` / `ventri-std` / `ventri-agent`，并创建 GitHub 组织？Agent 正式名是否就叫 “Ventri Agent”，CLI 命令 `va` 是否可以？
-4. **IM 渠道优先级**：飞书 → Telegram 的顺序是否正确？企业微信是否需要提前到 1.0 前？
-5. **数据边界**：哪些数据允许发送到 DeepSeek API？是否需要在 M2 就支持“敏感会话走本地模型”？
-6. **web.search 默认提供商**：自建 SearXNG（免费、需部署）还是某个商业搜索 API（需 key、需付费）？
-7. **T2 插件的网络权限**：是否允许模型生成的插件在清单声明后访问网络（建议允许，按域名白名单 + 每次首用审批）？
-8. **平台范围**：1.0 是否只承诺 Linux + macOS（Windows 仅 T0/T1、无 T2 沙箱）？
-9. **trio 支持**：内核长期保持 asyncio + trio 双后端，还是 M1 后只保 asyncio？
-10. **与 DeepSeek Harness 的关系**：是否需要与 Harness 的配置概念保持可映射（例如提供 `cordis.yml` 导入器），还是彻底独立（当前决定：独立，不兼容）？
+### 10.1 已决（2026-10-08，Jeff）
+
+| # | 问题 | 决定 | 影响章节 |
+|---|---|---|---|
+| D1 | 许可证 | **MIT**；仓库根目录 `LICENSE`，Copyright (c) 2026 Jeff / Ventri contributors | 7 |
+| D2 | 投入 | **全职**；保留按全职估算的路线图 | 8 |
+| D3 | 数据策略 | 所有数据**可以**发送到 DeepSeek API；M2 不要求“敏感会话走本地模型”，以后可作为可选能力 | 5.3、R9 |
+| D4 | T2 插件网络权限 | **推迟**：1.0 范围内 T2 无网络，`net` 字段保留；以后再决定 | 4.11 |
+| D5 | 1.0 平台 | **只支持 macOS**（沙箱用 `sandbox-exec` / macOS 机制）；Linux、Windows 推迟到 1.0 之后 | 1.2、3.1、4.11、7、8、R13 |
+| D6 | 与 Harness 的关系 | 不兼容运行时、不做 `cordis.yml` 导入；通过 MCP（主路径）、纯文本 Skills、schema/提示词复用资产；Node 桥接 1.0 后可选 | 6.1 |
+| — | PyPI 占位 | `ventri`、`ventri-agent` 已发布 0.0.1 占位（2026-10-08）；`ventri-std` 尚未占位 | 7 |
+
+### 10.2 仍待决
+
+1. **名称与组织**：Agent 正式名是否就叫 “Ventri Agent”，CLI 命令 `va` 是否可以？是否创建 GitHub 组织？何时占位 `ventri-std`（建议立即）？
+2. **IM 渠道优先级**：飞书 → Telegram 的顺序是否正确？企业微信是否需要提前到 1.0 前？
+3. **web.search 默认提供商**：自建 SearXNG（免费、需部署）还是某个商业搜索 API（需 key、需付费）？
+4. **trio 支持**：内核长期保持 asyncio + trio 双后端，还是 M1 后只保 asyncio？
+
+### 10.3 推迟的决策（1.0 之后再议）
+
+- T2 插件是否、以及如何获得网络访问（D4）。
+- Linux / Windows 支持与对应的沙箱后端（D5）。
+- 敏感会话的本地模型路由（D3）。
+- Harness TS 插件的 Node 子进程桥接（D6）。
 
 ---
 
