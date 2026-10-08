@@ -1,7 +1,7 @@
 import anyio
 import pytest
 
-from pykernel import plugin
+from ventri import plugin
 
 
 @pytest.fixture(params=["asyncio", "trio"])

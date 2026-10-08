@@ -1,7 +1,7 @@
 import anyio
 import pytest
 
-from pykernel import (Kernel, PluginError, State, TransactionBusy, TransactionConflict,
+from ventri import (Kernel, PluginError, State, TransactionBusy, TransactionConflict,
                       TransactionError, plugin)
 
 from .conftest import LLM, llm_plugin, make_tool

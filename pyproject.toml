@@ -1,5 +1,5 @@
 [project]
-name = "pykernel"
+name = "ventri"
 version = "0.1.0"
 description = "cordis-inspired plugin kernel with structured concurrency and transactional plugin changes"
 requires-python = ">=3.11"
@@ -13,7 +13,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["pykernel"]
+packages = ["ventri"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -9,7 +9,7 @@ from pathlib import Path
 import anyio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pykernel import Kernel, PluginError, plugin  # noqa: E402
+from ventri import Kernel, PluginError, plugin  # noqa: E402
 
 
 class FakeLLM:

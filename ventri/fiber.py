@@ -53,7 +53,7 @@ class _TaskLocal:
         self.tx: Transaction | None = None
 
 
-_local: ContextVar[_TaskLocal | None] = ContextVar("pykernel_local", default=None)
+_local: ContextVar[_TaskLocal | None] = ContextVar("ventri_local", default=None)
 
 
 def task_id() -> int:

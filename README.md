@@ -1,6 +1,9 @@
-# pykernel —— 受 cordis 启发的 Python 插件内核原型
+# Ventri —— 受 cordis 启发的 Python 插件内核原型
 
-一个小而可运行的插件内核（库代码约 1000 行有效代码），用来验证两个创新点：
+**Ventri** 取自拉丁语 *ventriculus*（心室）。cordis 意为“心脏”，而心室负责把血液泵向全身——
+Ventri 就是那个“泵”：驱动插件的加载、运行与更替。
+
+Ventri 是一个小而可运行的插件内核（库代码约 1000 行有效代码），用来验证两个创新点：
 
 - **(A) 结构化并发**：基于 `anyio`，每个插件（Fiber）拥有自己的 task group，任务树与插件树一一对应；
 - **(B) 事务化插件变更**：`async with ctx.transaction()` 批量加载/卸载/替换/重配置插件，失败整体回滚，其他插件看不到“半应用”状态。
@@ -17,7 +20,7 @@ python3 -m venv .venv && .venv/bin/pip install anyio pytest trio
 ```
 
 ```python
-from pykernel import Kernel, plugin
+from ventri import Kernel, plugin
 
 class LLM: ...
 
@@ -40,12 +43,12 @@ async with Kernel() as app:
 
 | 文件 | 内容 |
 |---|---|
-| `pykernel/kernel.py` | `Kernel`（根 Context）、服务注册表、reconcile 循环、事件分发、trace |
-| `pykernel/fiber.py` | `Fiber` 生命周期状态机、per-fiber 锁、task group 宿主任务、effect 栈、`spawn` |
-| `pykernel/context.py` | 插件看到的 API：`plugin/provide/get/on/effect/enter/spawn/emit/.../transaction/replace` |
-| `pykernel/transaction.py` | 事务：暂存（staging）、提交校验、原子交换、回滚 |
-| `pykernel/observe.py` | `snapshot()` / `tree()` |
-| `pykernel/plugin.py` | 插件描述（函数或类、`inject`、`Config`）与 `@plugin` 装饰器 |
+| `ventri/kernel.py` | `Kernel`（根 Context）、服务注册表、reconcile 循环、事件分发、trace |
+| `ventri/fiber.py` | `Fiber` 生命周期状态机、per-fiber 锁、task group 宿主任务、effect 栈、`spawn` |
+| `ventri/context.py` | 插件看到的 API：`plugin/provide/get/on/effect/enter/spawn/emit/.../transaction/replace` |
+| `ventri/transaction.py` | 事务：暂存（staging）、提交校验、原子交换、回滚 |
+| `ventri/observe.py` | `snapshot()` / `tree()` |
+| `ventri/plugin.py` | 插件描述（函数或类、`inject`、`Config`）与 `@plugin` 装饰器 |
 | `tests/` | 24 个测试 × 2 个后端（asyncio、trio）= 48 |
 | `examples/demo.py` | 假 LLM 服务 + 工具插件 + 后台任务 + 失败事务回滚 |
 

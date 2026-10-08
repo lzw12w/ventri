@@ -1,4 +1,4 @@
-"""pykernel -- a small cordis-inspired plugin kernel with structured concurrency
+"""Ventri -- a small cordis-inspired plugin kernel with structured concurrency
 (anyio) and transactional plugin changes."""
 from .context import Context
 from .errors import (KernelError, PluginError, ServiceConflict, ServiceNotFound,
